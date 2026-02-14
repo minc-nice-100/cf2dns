@@ -110,6 +110,91 @@ class HuaWeiApi():
         }
         return lines.get(line, None)
 
+    # 添加到 dns/huawei.py 中的 HuaWeiApi 类
+
+    def batch_delete_records(self, zone_id, record_ids):
+        """
+        批量删除记录集
+        API: BatchDeleteRecordSetWithLine
+        """
+        try:
+            url = f"{self.endpoint}/v2.1/zones/{zone_id}/recordsets/batch/delete"
+            
+            payload = {
+                "recordset_ids": record_ids
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-Auth-Token": self.token
+            }
+            
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 202:
+                return {"code": 0, "message": "success", "data": response.json()}
+            else:
+                return {"code": response.status_code, "message": response.text}
+        except Exception as e:
+            return {"code": 500, "message": str(e)}
+    
+    def batch_create_records(self, zone_id, name, record_type, line, records, ttl=300):
+        """
+        批量创建记录集
+        API: CreateRecordSetWithBatchLines
+        """
+        try:
+            url = f"{self.endpoint}/v2.1/zones/{zone_id}/recordsets/batch/lines"
+            
+            payload = {
+                "name": name,
+                "type": record_type,
+                "ttl": ttl,
+                "records": records,
+                "line": line
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-Auth-Token": self.token
+            }
+            
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 202:
+                return {"code": 0, "message": "success", "data": response.json()}
+            else:
+                return {"code": response.status_code, "message": response.text}
+        except Exception as e:
+            return {"code": 500, "message": str(e)}
+    
+    def batch_update_records(self, zone_id, record_sets):
+        """
+        批量修改记录集
+        API: BatchUpdateRecordSetWithLine
+        record_sets: [{"id": "record_id", "records": ["new_ip1", "new_ip2"], "ttl": 600}, ...]
+        """
+        try:
+            url = f"{self.endpoint}/v2.1/zones/{zone_id}/recordsets/batch/update"
+            
+            payload = {
+                "recordsets": record_sets
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-Auth-Token": self.token
+            }
+            
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 202:
+                return {"code": 0, "message": "success", "data": response.json()}
+            else:
+                return {"code": response.status_code, "message": response.text}
+        except Exception as e:
+            return {"code": 500, "message": str(e)}
+
 if __name__ == '__main__':
     hw_api = HuaWeiApi('WTTCWxxxxxxxxx84O0V', 'GXkG6D4X1Nxxxxxxxxxxxxxxxxxxxxx4lRg6lT')
     print(hw_api.get_record('xxxx.com', 100, '@', 'A'))
