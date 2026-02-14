@@ -286,7 +286,7 @@ def get_optimization_ip():
     try:
         headers = {'Content-Type': 'application/json'}
         data = {"key": config["key"], "type": iptype}
-        provider = [item for item in provider_data if item['id'] == config["data_server"]][0]
+        provider = "https://api.4ce.cn/api/bestCFIP"#[item for item in provider_data if item['id'] == config["data_server"]][0]
         
         print(f"请求API: {provider['get_ip_url']}")
         print(f"请求数据: {data}")
@@ -475,7 +475,7 @@ if __name__ == '__main__':
     print(f"IPv4启用: {config.get('ipv4')}")
     print(f"IPv6启用: {config.get('ipv6')}")
     print(f"TTL: {config.get('ttl')}")
-    print(f"数据源: {config.get('data_server')}")
+    print("数据源: https://api.4ce.cn/api/bestCFIP")
     print("="*60)
     print("线路处理规则:")
     print("  - 移动/联通/电信: 使用对应线路IP")
