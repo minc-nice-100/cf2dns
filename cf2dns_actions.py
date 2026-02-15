@@ -9,6 +9,7 @@ import requests
 import traceback
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
+from huaweicloudsdkdns.v2 import DnsClient  # 修复：添加关键的DnsClient导入
 # 统一从 model 包导入所需类
 from huaweicloudsdkdns.v2.model import (
     CreateRecordSetWithLineReq,
@@ -19,13 +20,33 @@ from huaweicloudsdkdns.v2.model import (
     BatchCreatePublicRecordsetsTaskItem,
     BatchCreatePublicRecordsetsTaskRequestBody
 )
-# 读取环境变量
-config = json.loads(os.environ["CONFIG"])
-DOMAINS = json.loads(os.environ["DOMAINS"])
-provider_data = json.loads(os.environ["PROVIDER"])
+
+# 读取环境变量（添加异常处理）
+try:
+    config = json.loads(os.environ.get("CONFIG", "{}"))
+    DOMAINS = json.loads(os.environ.get("DOMAINS", "{}"))
+    provider_data = json.loads(os.environ.get("PROVIDER", "[]"))
+except json.JSONDecodeError as e:
+    print(f"环境变量解析失败: {e}")
+    sys.exit(1)
 
 # 新的API地址
 NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
+
+# 配置默认值
+DEFAULT_CONFIG = {
+    "key": "",
+    "data_server": "",
+    "secretid": "",
+    "secretkey": "",
+    "region_hw": "cn-east-3",
+    "ipv4": "on",
+    "ipv6": "off",
+    "affect_num": 5,
+    "ttl": 600
+}
+# 合并配置，使用默认值填充缺失项
+config = {**DEFAULT_CONFIG, **config}
 
 
 class HuaWeiApi:
@@ -36,14 +57,19 @@ class HuaWeiApi:
         self.SK = SECRETKEY
         self.region = REGION
         
-        credentials = BasicCredentials(self.AK, self.SK)
-        
-        self.client = DnsClient.new_builder() \
-            .with_credentials(credentials) \
-            .with_region(DnsRegion.value_of(self.region)) \
-            .build()
+        try:
+            credentials = BasicCredentials(self.AK, self.SK)
+            self.client = DnsClient.new_builder() \
+                .with_credentials(credentials) \
+                .with_region(DnsRegion.value_of(self.region)) \
+                .build()
+        except Exception as e:
+            print(f"初始化华为云客户端失败: {e}")
+            raise
         
         self.zone_id = self.get_zones()
+        if not self.zone_id:
+            print("警告：未获取到任何域名的zone_id")
 
     def del_record(self, domain, record_id):
         """删除单条记录集"""
@@ -55,9 +81,11 @@ class HuaWeiApi:
             
             request.recordset_id = record_id
             response = self.client.delete_record_sets(request)
-            return json.loads(str(response))
+            # 修复：华为云SDK响应对象处理
+            response_dict = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
+            return {"code": 0, "data": response_dict}
         except Exception as e:
-            return {"code": 500, "message": str(e)}
+            return {"code": 500, "message": str(e), "trace": traceback.format_exc()}
 
     def get_record(self, domain, length, sub_domain, record_type):
         """获取记录集列表"""
@@ -72,7 +100,8 @@ class HuaWeiApi:
                 request.name = sub_domain + '.' + domain + "."
             
             response = self.client.list_record_sets_with_line(request)
-            data = json.loads(str(response))
+            # 修复：统一响应解析方式
+            data = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
             
             result = {'data': {'records': []}, 'code': 0}
             
@@ -99,7 +128,7 @@ class HuaWeiApi:
             
             return result
         except Exception as e:
-            return {"code": 500, "data": {"records": []}, "message": str(e)}
+            return {"code": 500, "data": {"records": []}, "message": str(e), "trace": traceback.format_exc()}
 
     def create_record(self, domain, sub_domain, values, record_type, line, ttl):
         """创建记录集（支持批量IP）- 保留单个创建方法，但主流程已改用批量接口"""
@@ -129,9 +158,10 @@ class HuaWeiApi:
             )
             
             response = self.client.create_record_set_with_line(request)
-            return json.loads(str(response))
+            response_dict = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
+            return {"code": 0, "data": response_dict}
         except Exception as e:
-            return {"code": 500, "message": str(e)}
+            return {"code": 500, "message": str(e), "trace": traceback.format_exc()}
 
     def batch_create_records(self, domain, recordsets):
         """
@@ -164,16 +194,17 @@ class HuaWeiApi:
             request.body = BatchCreatePublicRecordsetsTaskRequestBody(recordsets=items)
             response = self.client.batch_create_public_recordsets_task(request)
             # 返回响应字典（通常包含 task_id）
-            return json.loads(str(response))
+            response_dict = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
+            return {"code": 0, "data": response_dict}
         except Exception as e:
-            return {"code": 500, "message": str(e)}
+            return {"code": 500, "message": str(e), "trace": traceback.format_exc()}
 
     def get_zones(self):
         """获取所有公网域名的zone_id映射"""
         try:
             request = ListPublicZonesRequest()
             response = self.client.list_public_zones(request)
-            result = json.loads(str(response))
+            result = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
             
             zone_id = {}
             for zone in result.get('zones', []):
@@ -209,21 +240,25 @@ def get_optimization_ip(iptype):
         # 1. 从原API获取IP信息
         try:
             data = {"key": config["key"], "type": iptype}
-            provider = [p for p in provider_data if p['id'] == config["data_server"]][0]
-            response = requests.post(provider['get_ip_url'], json=data, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                old_data = response.json()
-                if old_data and old_data.get("code") == 200:
-                    for isp in ["CM", "CU", "CT"]:
-                        for ip_info in old_data["info"].get(isp, []):
-                            if isinstance(ip_info, str):
-                                ip_info = {"ip": ip_info}
-                            elif isinstance(ip_info, dict) and "ip" not in ip_info:
-                                if "value" in ip_info:
-                                    ip_info["ip"] = ip_info["value"]
-                            merged_ips[isp].append(ip_info)
-                    print(f"从原API获取到 {sum(len(merged_ips[isp]) for isp in ['CM','CU','CT'])} 个{iptype} IP")
+            # 修复：处理provider_data为空的情况
+            provider = next((p for p in provider_data if p.get('id') == config["data_server"]), None)
+            if provider and provider.get('get_ip_url'):
+                response = requests.post(provider['get_ip_url'], json=data, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    old_data = response.json()
+                    if old_data and old_data.get("code") == 200:
+                        for isp in ["CM", "CU", "CT"]:
+                            for ip_info in old_data["info"].get(isp, []):
+                                if isinstance(ip_info, str):
+                                    ip_info = {"ip": ip_info}
+                                elif isinstance(ip_info, dict) and "ip" not in ip_info:
+                                    if "value" in ip_info:
+                                        ip_info["ip"] = ip_info["value"]
+                                merged_ips[isp].append(ip_info)
+                        print(f"从原API获取到 {sum(len(merged_ips[isp]) for isp in ['CM','CU','CT'])} 个{iptype} IP")
+            else:
+                print("原API配置不完整，跳过")
         except Exception as e:
             print(f"从原API获取IP失败: {e}")
         
@@ -251,20 +286,20 @@ def get_optimization_ip(iptype):
         except Exception as e:
             print(f"从新API获取IP失败: {e}")
         
-        # 3. 去重
+        # 3. 去重（优化：保留完整信息，只去重IP）
         for isp in ["CM", "CU", "CT"]:
             seen_ips = set()
             unique_ips = []
             for ip_info in merged_ips[isp]:
-                ip = ip_info.get("ip", "")
+                ip = ip_info.get("ip", "").strip()
                 if ip and ip not in seen_ips:
                     seen_ips.add(ip)
                     unique_ips.append(ip_info)
             merged_ips[isp] = unique_ips
         
-        # 4. 按速度排序
+        # 4. 按速度排序（优化：处理speed为None的情况）
         for isp in ["CM", "CU", "CT"]:
-            merged_ips[isp].sort(key=lambda x: x.get("speed", 0), reverse=True)
+            merged_ips[isp].sort(key=lambda x: x.get("speed", 0) or 0, reverse=True)
         
         total_ips = sum(len(merged_ips[isp]) for isp in ["CM", "CU", "CT"])
         print(f"合并后总共获取到 {total_ips} 个{iptype} IP")
@@ -317,7 +352,7 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
         for record_type in record_types:
             for record_id, record_info in existing_records[record_type].items():
                 ret = cloud.del_record(domain, record_id)
-                if ret.get("code") == 0 or "code" not in ret:
+                if ret.get("code") == 0:
                     print(f"✓ 删除旧{record_type}记录: {record_info['line']} - {record_info['ips']}")
                     deleted_count += 1
                 else:
@@ -344,55 +379,45 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
             # 获取新IP（IPv4）
             ip_list_v4 = []
             if all_ips.get("v4") and all_ips["v4"].get("code") == 200:
-                if line == "CM":
-                    ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"]["CM"]]
-                elif line == "CU":
-                    ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"]["CU"]]
-                elif line == "CT":
-                    ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"]["CT"]]
+                ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"].get(line, [])]
                 if ip_list_v4:
-                    if len(ip_list_v4) > config["affect_num"]:
-                        ip_list_v4 = ip_list_v4[:config["affect_num"]]
+                    # 限制IP数量
+                    ip_list_v4 = ip_list_v4[:config["affect_num"]]
                     # 添加A记录集
                     records_to_create.append({
                         "name": full_name,
                         "type": "A",
                         "records": ip_list_v4,
                         "ttl": ttl,
-                        "line": line_chinese  # 传入中文，batch方法中会转换
+                        "line": line_chinese
                     })
             
             # 获取新IP（IPv6）
             ip_list_v6 = []
             if all_ips.get("v6") and all_ips["v6"].get("code") == 200:
-                if line == "CM":
-                    ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"]["CM"]]
-                elif line == "CU":
-                    ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"]["CU"]]
-                elif line == "CT":
-                    ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"]["CT"]]
+                ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"].get(line, [])]
                 if ip_list_v6:
-                    if len(ip_list_v6) > config["affect_num"]:
-                        ip_list_v6 = ip_list_v6[:config["affect_num"]]
+                    # 限制IP数量
+                    ip_list_v6 = ip_list_v6[:config["affect_num"]]
                     # 添加AAAA记录集
                     records_to_create.append({
                         "name": full_name,
                         "type": "AAAA",
                         "records": ip_list_v6,
                         "ttl": ttl,
-                        "line": line_chinese  # 传入中文，batch方法中会转换
+                        "line": line_chinese
                     })
         
         # 批量创建新记录集
         if records_to_create:
             ret = cloud.batch_create_records(domain, records_to_create)
-            # 判断是否成功（通常返回字典包含 task_id）
-            if isinstance(ret, dict) and ("task_id" in ret or "code" not in ret):
+            # 判断是否成功
+            if ret.get("code") == 0:
                 print(f"✓ 批量创建成功，创建了 {len(records_to_create)} 条记录集")
                 for rs in records_to_create:
                     print(f"  - {rs['type']} {rs['line']}: {rs['records']}")
-                if "task_id" in ret:
-                    print(f"  任务ID: {ret['task_id']}")
+                if "task_id" in ret.get("data", {}):
+                    print(f"  任务ID: {ret['data']['task_id']}")
             else:
                 print(f"✗ 批量创建失败: {ret.get('message', '未知错误')}")
         else:
@@ -407,16 +432,25 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
 
 def main():
     """主函数"""
-    if len(DOMAINS) == 0:
+    if not DOMAINS or len(DOMAINS) == 0:
         print("没有配置域名")
         return
     
+    # 验证关键配置
+    if not config.get("secretid") or not config.get("secretkey"):
+        print("错误：华为云密钥配置不完整")
+        sys.exit(1)
+    
     # 初始化华为云客户端
-    cloud = HuaWeiApi(
-        config["secretid"],
-        config["secretkey"],
-        config.get("region_hw", "cn-east-3")
-    )
+    try:
+        cloud = HuaWeiApi(
+            config["secretid"],
+            config["secretkey"],
+            config.get("region_hw", "cn-east-3")
+        )
+    except Exception as e:
+        print(f"初始化华为云客户端失败: {e}")
+        sys.exit(1)
     
     print("=" * 60)
     print("开始更新移动、联通、电信的A和AAAA记录")
@@ -428,14 +462,25 @@ def main():
     all_ips = {"v4": None, "v6": None}
     
     if config.get("ipv4") == "on":
+        print("\n开始获取IPv4优化IP...")
         all_ips["v4"] = get_optimization_ip("v4")
         if all_ips["v4"]:
-            print(f"\nIPv4 IP数量 - 移动:{len(all_ips['v4']['info']['CM'])} 联通:{len(all_ips['v4']['info']['CU'])} 电信:{len(all_ips['v4']['info']['CT'])}")
+            print(f"IPv4 IP数量 - 移动:{len(all_ips['v4']['info']['CM'])} 联通:{len(all_ips['v4']['info']['CU'])} 电信:{len(all_ips['v4']['info']['CT'])}")
+        else:
+            print("获取IPv4 IP失败")
     
     if config.get("ipv6") == "on":
+        print("\n开始获取IPv6优化IP...")
         all_ips["v6"] = get_optimization_ip("v6")
         if all_ips["v6"]:
             print(f"IPv6 IP数量 - 移动:{len(all_ips['v6']['info']['CM'])} 联通:{len(all_ips['v6']['info']['CU'])} 电信:{len(all_ips['v6']['info']['CT'])}")
+        else:
+            print("获取IPv6 IP失败")
+    
+    # 检查是否获取到IP
+    if not all_ips["v4"] and not all_ips["v6"]:
+        print("错误：未获取到任何IP地址，程序退出")
+        sys.exit(1)
     
     # 遍历所有域名和子域名
     for domain, sub_domains in DOMAINS.items():
@@ -451,6 +496,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+        print("\n程序执行完成")
     except Exception as e:
         print(f"程序执行失败: {e}")
         traceback.print_exc()
