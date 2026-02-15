@@ -10,15 +10,16 @@ import traceback
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
 from huaweicloudsdkdns.v2 import DnsClient  # 修复：添加关键的DnsClient导入
-# 统一从 model 包导入所需类
+# 统一从 model 包导入所需类（修复类名错误）
 from huaweicloudsdkdns.v2.model import (
-    CreateRecordSetWithLineReq,
+    CreateRecordSetWithLineRequest,  # 修复：替换 CreateRecordSetWithLineReq 为正确类名
     DeleteRecordSetsRequest,
     ListRecordSetsWithLineRequest,
     ListPublicZonesRequest,
     BatchCreatePublicRecordsetsTaskRequest,
     BatchCreatePublicRecordsetsTaskItem,
-    BatchCreatePublicRecordsetsTaskRequestBody
+    BatchCreatePublicRecordsetsTaskRequestBody,
+    CreateRecordSetWithLineRequestBody  # 新增：导入请求体类
 )
 
 # 读取环境变量（添加异常处理）
@@ -133,7 +134,7 @@ class HuaWeiApi:
     def create_record(self, domain, sub_domain, values, record_type, line, ttl):
         """创建记录集（支持批量IP）- 保留单个创建方法，但主流程已改用批量接口"""
         try:
-            request = CreateRecordSetWithLineRequest()
+            request = CreateRecordSetWithLineRequest()  # 修复：类名修正
             request.zone_id = self.zone_id.get(domain + '.')
             if not request.zone_id:
                 return {"code": 404, "message": f"域名{domain}不存在"}
@@ -149,7 +150,8 @@ class HuaWeiApi:
             else:
                 records_list = values
             
-            request.body = CreateRecordSetWithLineReq(
+            # 修复：使用正确的请求体类 CreateRecordSetWithLineRequestBody
+            request.body = CreateRecordSetWithLineRequestBody(
                 type=record_type,
                 name=name,
                 ttl=ttl,
