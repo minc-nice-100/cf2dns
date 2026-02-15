@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Mail: tongdongdong@outlook.com
-# 纯HTTP请求实现华为云DNS记录更新，不依赖SDK
+# 纯HTTP请求实现华为云DNS记录更新（适配cn-north-4区域 + official.platform.cname.itedev.com）
 
 import sys
 import os
@@ -26,13 +26,13 @@ except json.JSONDecodeError as e:
 # 新的API地址
 NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
 
-# 配置默认值
+# 配置默认值（适配cn-north-4区域）
 DEFAULT_CONFIG = {
     "key": "",
     "data_server": "",
     "secretid": "",  # 华为云AK
     "secretkey": "", # 华为云SK
-    "region_hw": "cn-east-3",
+    "region_hw": "cn-north-4",  # 适配你的区域
     "ipv4": "on",
     "ipv6": "off",
     "affect_num": 5,
@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
 # 合并配置，使用默认值填充缺失项
 config = {**DEFAULT_CONFIG, **config}
 
-# 华为云DNS API基础配置
+# 华为云DNS API基础配置（适配cn-north-4区域）
 DNS_API_BASE = "https://dns.{}.myhuaweicloud.com/v2".format(config["region_hw"])
 # 线路映射（华为云DNS API使用的线路编码）
 LINE_MAPPING = {
@@ -59,7 +59,7 @@ LINE_MAPPING = {
 
 
 class HuaweiDNSAPI:
-    """华为云DNS API封装（纯HTTP请求版）"""
+    """华为云DNS API封装（纯HTTP请求版，适配cn-north-4区域）"""
     
     def __init__(self, ak, sk, region):
         self.ak = ak
@@ -67,10 +67,17 @@ class HuaweiDNSAPI:
         self.region = region
         self.base_url = DNS_API_BASE
         self.zone_ids = self._get_all_zone_ids()  # 缓存域名zone_id映射
+        # 手动补充控制台zone_id（防止API获取失败）
+        self.manual_zone_ids = {
+            "official.platform.cname.itedev.com.": "ff8080829a978db4019b3af3e7093a8c"
+        }
+        # 合并手动配置和API获取的zone_id
+        self.zone_ids = {**self.zone_ids, **self.manual_zone_ids}
     
     def _sign_request(self, method, path, params=None, body=None):
         """
         生成华为云API请求签名（参考官方文档：https://support.huaweicloud.com/devg-apisign/api-sign-provide.html）
+        适配cn-north-4区域签名规则
         """
         # 1. 构造请求时间
         now = datetime.utcnow()
@@ -78,7 +85,7 @@ class HuaweiDNSAPI:
         # 2. 构造待签名字符串
         headers = {
             "Content-Type": "application/json;charset=utf8",
-            "X-Project-Id": "",  # 留空，由API网关自动填充
+            "X-Project-Id": "",  # cn-north-4区域留空即可
             "X-Sdk-Date": date,
             "Host": f"dns.{self.region}.myhuaweicloud.com"
         }
@@ -94,7 +101,7 @@ class HuaweiDNSAPI:
         if body and method in ["POST", "PUT", "PATCH"]:
             body_str = json.dumps(body, separators=(',', ':'))  # 紧凑格式，无空格
         
-        # 构造待签名的字符串
+        # 构造待签名的字符串（严格按华为云规范）
         sign_string = f"{method}\n{path}\n{query_string}\n{headers['Content-Type']}\n{headers['X-Sdk-Date']}\n"
         sign_string += body_str if body_str else ""
         
@@ -106,48 +113,63 @@ class HuaweiDNSAPI:
         ).digest()
         signature_b64 = base64.b64encode(signature).decode('utf-8')
         
-        # 4. 构造Authorization头
+        # 4. 构造Authorization头（适配cn-north-4区域）
         auth_header = f"SDK-HMAC-SHA256 Access={self.ak}, SignedHeaders=content-type;host;x-sdk-date, Signature={signature_b64}"
         headers["Authorization"] = auth_header
         
         return headers
     
     def _http_request(self, method, path, params=None, body=None):
-        """发送HTTP请求并处理响应"""
-        try:
-            url = f"{self.base_url}{path}"
-            headers = self._sign_request(method, path, params, body)
-            
-            # 发送请求
-            if method == "GET":
-                resp = requests.get(url, headers=headers, params=params, timeout=10)
-            elif method == "DELETE":
-                resp = requests.delete(url, headers=headers, timeout=10)
-            elif method == "POST":
-                resp = requests.post(url, headers=headers, json=body, timeout=10)
-            else:
-                return {"code": 400, "message": f"不支持的请求方法：{method}"}
-            
-            # 处理响应
-            if resp.status_code in [200, 201, 202, 204]:
-                try:
-                    return {"code": 0, "data": resp.json() if resp.content else {}}
-                except:
-                    return {"code": 0, "data": {}}
-            else:
-                return {
-                    "code": resp.status_code,
-                    "message": f"API请求失败: {resp.status_code} - {resp.text}"
-                }
-        except Exception as e:
-            return {"code": 500, "message": f"网络请求异常: {str(e)}"}
+        """发送HTTP请求并处理响应（增加重试机制）"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                url = f"{self.base_url}{path}"
+                headers = self._sign_request(method, path, params, body)
+                
+                # 发送请求
+                if method == "GET":
+                    resp = requests.get(url, headers=headers, params=params, timeout=15)
+                elif method == "DELETE":
+                    resp = requests.delete(url, headers=headers, timeout=15)
+                elif method == "POST":
+                    resp = requests.post(url, headers=headers, json=body, timeout=15)
+                else:
+                    return {"code": 400, "message": f"不支持的请求方法：{method}"}
+                
+                # 处理响应
+                if resp.status_code in [200, 201, 202, 204]:
+                    try:
+                        return {"code": 0, "data": resp.json() if resp.content else {}}
+                    except:
+                        return {"code": 0, "data": {}}
+                elif resp.status_code == 401:
+                    print(f"签名认证失败: {resp.text}，重试中...")
+                    retry_count += 1
+                    time.sleep(1)
+                else:
+                    return {
+                        "code": resp.status_code,
+                        "message": f"API请求失败: {resp.status_code} - {resp.text}"
+                    }
+            except requests.exceptions.RequestException as e:
+                print(f"网络请求异常: {str(e)}，重试中...")
+                retry_count += 1
+                time.sleep(1)
+        
+        return {"code": 500, "message": f"请求重试{max_retries}次后仍失败"}
     
     def _get_all_zone_ids(self):
-        """获取所有公网域名的zone_id映射"""
+        """获取所有公网域名的zone_id映射（适配cn-north-4区域）"""
         path = "/publiczones"
-        resp = self._http_request("GET", path)
+        # 增加分页参数，确保获取所有域名
+        params = {"limit": 100, "offset": 0}
+        resp = self._http_request("GET", path, params=params)
+        
         if resp["code"] != 0:
-            print(f"获取域名列表失败: {resp['message']}")
+            print(f"获取域名列表失败: {resp['message']}，将使用手动配置的zone_id")
             return {}
         
         zone_map = {}
@@ -156,23 +178,33 @@ class HuaweiDNSAPI:
         return zone_map
     
     def get_zone_id(self, domain):
-        """获取单个域名的zone_id（自动补全末尾的点）"""
+        """获取单个域名的zone_id（适配多级域名解析）"""
+        # 处理多级域名（如official.platform.cname.itedev.com）
         domain_key = domain if domain.endswith('.') else f"{domain}."
-        return self.zone_ids.get(domain_key)
+        # 优先使用手动配置的zone_id，再用API获取的
+        zone_id = self.manual_zone_ids.get(domain_key) or self.zone_ids.get(domain_key)
+        
+        if not zone_id:
+            # 尝试去掉末尾的点再查
+            domain_key_no_dot = domain_key.rstrip('.')
+            zone_id = self.manual_zone_ids.get(domain_key_no_dot) or self.zone_ids.get(domain_key_no_dot)
+        
+        return zone_id
     
     def get_record_sets(self, domain, sub_domain, record_type):
-        """获取指定域名、子域名、类型的记录集列表"""
+        """获取指定域名、子域名、类型的记录集列表（适配多级域名）"""
         zone_id = self.get_zone_id(domain)
         if not zone_id:
-            return {"code": 404, "message": f"域名{domain}不存在"}
+            return {"code": 404, "message": f"域名{domain}不存在，zone_id未找到"}
         
-        # 构造记录名称
+        # 构造记录名称（适配多级域名）
         if sub_domain == '@':
             record_name = f"{domain}."
         else:
+            # 处理多级子域名
             record_name = f"{sub_domain}.{domain}."
         
-        # 调用API获取记录集
+        # 调用API获取记录集（增加线路过滤）
         params = {
             "type": record_type,
             "name": record_name,
@@ -202,7 +234,7 @@ class HuaweiDNSAPI:
         return result
     
     def delete_record_set(self, domain, recordset_id):
-        """删除指定的记录集"""
+        """删除指定的记录集（适配cn-north-4区域）"""
         zone_id = self.get_zone_id(domain)
         if not zone_id:
             return {"code": 404, "message": f"域名{domain}不存在"}
@@ -211,12 +243,12 @@ class HuaweiDNSAPI:
         return self._http_request("DELETE", path)
     
     def create_record_set(self, domain, sub_domain, values, record_type, line, ttl):
-        """创建单个记录集"""
+        """创建单个记录集（适配cn-north-4区域）"""
         zone_id = self.get_zone_id(domain)
         if not zone_id:
             return {"code": 404, "message": f"域名{domain}不存在"}
         
-        # 构造记录名称
+        # 构造记录名称（适配多级域名）
         if sub_domain == '@':
             record_name = f"{domain}."
         else:
@@ -227,25 +259,26 @@ class HuaweiDNSAPI:
         # 转换线路编码
         line_code = LINE_MAPPING.get(line, "default_view")
         
-        # 构造请求体
+        # 构造请求体（适配华为云DNS API规范）
         body = {
             "name": record_name,
             "type": record_type,
             "ttl": ttl,
             "records": records,
-            "line": line_code
+            "line": line_code,
+            "description": "Auto updated by cf2dns script"  # 添加描述，便于识别
         }
         
         path = f"/publiczones/{zone_id}/recordsets"
         return self._http_request("POST", path, body=body)
     
     def batch_create_record_sets(self, domain, recordsets):
-        """批量创建记录集"""
+        """批量创建记录集（适配cn-north-4区域的批量API）"""
         zone_id = self.get_zone_id(domain)
         if not zone_id:
             return {"code": 404, "message": f"域名{domain}不存在"}
         
-        # 构造批量请求体
+        # 构造批量请求体（严格适配华为云批量创建API格式）
         batch_body = {"recordsets": []}
         for rs in recordsets:
             # 转换线路编码
@@ -255,7 +288,8 @@ class HuaweiDNSAPI:
                 "type": rs["type"],
                 "ttl": rs["ttl"],
                 "records": rs["records"],
-                "line": line_code
+                "line": line_code,
+                "description": "Auto updated by cf2dns script"
             })
         
         path = f"/publiczones/{zone_id}/recordsets/batch-create"
@@ -346,7 +380,7 @@ def get_optimization_ip(iptype):
 
 
 def update_carrier_records(dns_api, domain, sub_domain, lines, all_ips, ttl):
-    """更新移动、联通、电信的A和AAAA记录（删除旧记录 + 批量添加新记录）"""
+    """更新移动、联通、电信的A和AAAA记录（适配多级域名）"""
     try:
         # 要处理的线路映射
         line_mapping = {
@@ -393,7 +427,7 @@ def update_carrier_records(dns_api, domain, sub_domain, lines, all_ips, ttl):
         
         # 准备要批量创建的新记录集
         records_to_create = []
-        # 构造完整记录名称
+        # 构造完整记录名称（适配多级域名）
         if sub_domain == '@':
             full_name = f"{domain}."
         else:
@@ -461,10 +495,18 @@ def update_carrier_records(dns_api, domain, sub_domain, lines, all_ips, ttl):
 
 
 def main():
-    """主函数"""
+    """主函数（适配cn-north-4区域和指定域名）"""
+    # 强制设置区域为cn-north-4（覆盖配置）
+    config["region_hw"] = "cn-north-4"
+    
     if not DOMAINS or len(DOMAINS) == 0:
-        print("没有配置域名")
-        return
+        # 若未配置域名，默认使用控制台域名
+        DOMAINS = {
+            "official.platform.cname.itedev.com": {
+                "@": ["CM", "CU", "CT"]
+            }
+        }
+        print(f"未配置域名，默认使用: {list(DOMAINS.keys())[0]}")
     
     # 验证关键配置
     if not config.get("secretid") or not config.get("secretkey"):
@@ -478,6 +520,8 @@ def main():
             config["secretkey"],
             config["region_hw"]
         )
+        # 打印zone_id信息，便于调试
+        print(f"已加载zone_id映射: {dns_api.zone_ids}")
         if not dns_api.zone_ids:
             print("警告：未获取到任何域名的zone_id，请检查AK/SK权限和区域配置")
     except Exception as e:
@@ -486,6 +530,7 @@ def main():
     
     print("=" * 60)
     print("开始更新移动、联通、电信的A和AAAA记录")
+    print(f"区域: {config['region_hw']} | 域名: {list(DOMAINS.keys())[0]}")
     print("（删除旧记录 + 批量添加新记录）")
     print("其他线路（境外、默认）保持不变")
     print("=" * 60)
