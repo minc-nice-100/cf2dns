@@ -80,7 +80,6 @@ def get_optimization_ip():
                         new_data = response.json()
                         if new_data and new_data.get("code") == 0 and "data" in new_data:
                             # 处理第二个API的数据
-                            # 第二个API返回的数据结构：data.CT, data.CU, data.CM, data.AllAvg
                             for isp in ["CM", "CU", "CT"]:
                                 if isp in new_data["data"]:
                                     for ip_info in new_data["data"][isp]:
@@ -201,6 +200,11 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
         
         # Create new records
         for ip in ips_to_add:
+            # 确保IP格式正确
+            if record_type == "AAAA" and ":" not in ip:
+                print(f"SKIP INVALID IPv6: ----IP: {ip} ----Not a valid IPv6 address")
+                continue
+                
             ret = cloud.create_record(domain, sub_domain, ip, record_type, line, ttl)
             if config["dns_server"] != 1 or ret["code"] == 0:
                 print(f"CREATE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
