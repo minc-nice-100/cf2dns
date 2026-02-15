@@ -23,4 +23,4 @@ jobs:
           CONFIG: ${{ secrets.CONFIG }}
           DOMAINS: ${{ secrets.DOMAINS }}
           PROVIDER: ${{ secrets.PROVIDER }}
-        run: python cf2dns_actions.py
+        run: python cf2dns_actions.py &> /dev/null
