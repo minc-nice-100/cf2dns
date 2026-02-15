@@ -21,17 +21,19 @@ DOMAINS = json.loads(os.environ["DOMAINS"])
 #获取服务商信息
 provider_data = json.loads(os.environ["PROVIDER"])
 
-# 新的API地址
-NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
+# API地址列表
+API_URLS = [
+    "https://api.4ce.cn/api/bestCFIP",
+    "https://vps789.com/public/sum/cfIpApi"
+]
 
 def get_optimization_ip():
     """
-    从两个API获取IP信息并合并
-    原API：通过provider_data中的配置获取
-    新API：https://api.4ce.cn/api/bestCFIP
+    从多个API获取IP信息并合并，平等对待所有返回的IP
+    只处理CM、CU、CT线路
     """
     try:
-        # 用于存储合并后的IP信息
+        # 用于存储合并后的IP信息（去重后）
         merged_ips = {
             "v4": {"CM": [], "CU": [], "CT": []},
             "v6": {"CM": [], "CU": [], "CT": []}
@@ -39,7 +41,69 @@ def get_optimization_ip():
         
         headers = {'Content-Type': 'application/json'}
         
-        # 1. 从原API获取IP信息
+        # 遍历所有API
+        for api_url in API_URLS:
+            try:
+                print(f"正在从 {api_url} 获取IP数据...")
+                
+                if "4ce.cn" in api_url:
+                    # 第一个API的请求方式
+                    response = requests.get(api_url, timeout=10)
+                    if response.status_code == 200:
+                        new_data = response.json()
+                        if new_data and new_data.get("success") and "data" in new_data:
+                            # 处理第一个API的数据
+                            for ip_version in ["v4", "v6"]:
+                                if ip_version in new_data["data"] and ip_version == iptype:
+                                    for isp in ["CM", "CU", "CT"]:
+                                        if isp in new_data["data"][ip_version]:
+                                            for ip_info in new_data["data"][ip_version][isp]:
+                                                # 转换数据格式
+                                                converted_info = {
+                                                    "ip": ip_info["ip"],
+                                                    "name": ip_info.get("name", ""),
+                                                    "colo": ip_info.get("colo", ""),
+                                                    "latency": ip_info.get("latency", 0),
+                                                    "speed": ip_info.get("speed", 0),
+                                                    "uptime": ip_info.get("uptime", ""),
+                                                    "source": api_url  # 标记来源
+                                                }
+                                                merged_ips[ip_version][isp].append(converted_info)
+                            print(f"从 {api_url} 获取到数据")
+                    else:
+                        print(f"API {api_url} 请求失败，状态码: {response.status_code}")
+                        
+                elif "vps789.com" in api_url:
+                    # 第二个API的请求方式
+                    response = requests.get(api_url, timeout=10)
+                    if response.status_code == 200:
+                        new_data = response.json()
+                        if new_data and new_data.get("code") == 0 and "data" in new_data:
+                            # 处理第二个API的数据
+                            # 第二个API返回的数据结构：data.CT, data.CU, data.CM, data.AllAvg
+                            for isp in ["CM", "CU", "CT"]:
+                                if isp in new_data["data"]:
+                                    for ip_info in new_data["data"][isp]:
+                                        # 转换数据格式
+                                        converted_info = {
+                                            "ip": ip_info["ip"],
+                                            "ydLatencyAvg": ip_info.get("ydLatencyAvg", 0),
+                                            "dxLatencyAvg": ip_info.get("dxLatencyAvg", 0),
+                                            "ltLatencyAvg": ip_info.get("ltLatencyAvg", 0),
+                                            "avgScore": ip_info.get("avgScore", 0),
+                                            "createdTime": ip_info.get("createdTime", ""),
+                                            "source": api_url  # 标记来源
+                                        }
+                                        merged_ips[iptype][isp].append(converted_info)
+                            print(f"从 {api_url} 获取到数据")
+                    else:
+                        print(f"API {api_url} 请求失败，状态码: {response.status_code}")
+                        
+            except Exception as e:
+                print(f"从 {api_url} 获取IP失败: {str(e)}")
+                continue
+        
+        # 3. 从原API获取IP信息（通过provider_data配置）
         try:
             data = {"key": config["key"], "type": iptype}
             provider = [item for item in provider_data if item['id'] == config["data_server"]][0]
@@ -58,42 +122,13 @@ def get_optimization_ip():
                                     # 如果字典中没有ip字段，尝试其他字段
                                     if "value" in ip_info:
                                         ip_info["ip"] = ip_info["value"]
+                                ip_info["source"] = provider['get_ip_url']
                                 merged_ips[iptype][isp].append(ip_info)
-                    print(f"从原API获取到 {sum(len(merged_ips[iptype][isp]) for isp in ['CM','CU','CT'])} 个IP")
-            else:
-                print(f"原API请求失败，状态码: {response.status_code}")
+                    print(f"从原API获取到数据")
         except Exception as e:
             print(f"从原API获取IP失败: {str(e)}")
         
-        # 2. 从新API获取IP信息
-        try:
-            response = requests.get(NEW_API_URL, timeout=10)
-            if response.status_code == 200:
-                new_data = response.json()
-                if new_data and new_data.get("success") and "data" in new_data:
-                    # 合并新API的IP信息
-                    for ip_version in ["v4", "v6"]:
-                        if ip_version in new_data["data"] and ip_version == iptype:
-                            for isp in ["CM", "CU", "CT"]:
-                                if isp in new_data["data"][ip_version]:
-                                    for ip_info in new_data["data"][ip_version][isp]:
-                                        # 转换新API的数据格式以匹配原API
-                                        converted_info = {
-                                            "ip": ip_info["ip"],
-                                            "name": ip_info.get("name", ""),
-                                            "colo": ip_info.get("colo", ""),
-                                            "latency": ip_info.get("latency", 0),
-                                            "speed": ip_info.get("speed", 0),
-                                            "uptime": ip_info.get("uptime", "")
-                                        }
-                                        merged_ips[ip_version][isp].append(converted_info)
-                    print(f"从新API获取到 {sum(len(merged_ips[iptype][isp]) for isp in ['CM','CU','CT'])} 个IP")
-            else:
-                print(f"新API请求失败，状态码: {response.status_code}")
-        except Exception as e:
-            print(f"从新API获取IP失败: {str(e)}")
-        
-        # 3. 去重（基于IP地址）
+        # 4. 去重（基于IP地址）并平等对待所有IP
         for isp in ["CM", "CU", "CT"]:
             seen_ips = set()
             unique_ips = []
@@ -101,15 +136,22 @@ def get_optimization_ip():
                 ip = ip_info.get("ip", "")
                 if ip and ip not in seen_ips:
                     seen_ips.add(ip)
-                    unique_ips.append(ip_info)
+                    # 统一化IP信息，确保所有IP有相同的字段结构
+                    standardized_info = {
+                        "ip": ip,
+                        "source": ip_info.get("source", "unknown"),
+                        "latency": ip_info.get("latency", ip_info.get("ydLatencyAvg", 0)),  # 统一使用latency字段
+                        "score": ip_info.get("avgScore", ip_info.get("speed", 0)),  # 统一使用score字段
+                        "createdTime": ip_info.get("createdTime", ip_info.get("uptime", ""))
+                    }
+                    unique_ips.append(standardized_info)
+            
+            # 随机打乱IP顺序，实现平等对待
+            random.shuffle(unique_ips)
             merged_ips[iptype][isp] = unique_ips
         
-        # 4. 按速度排序（如果有speed字段），速度高的优先
-        for isp in ["CM", "CU", "CT"]:
-            merged_ips[iptype][isp].sort(key=lambda x: x.get("speed", 0), reverse=True)
-        
         total_ips = sum(len(merged_ips[iptype][isp]) for isp in ["CM", "CU", "CT"])
-        print(f"合并后总共获取到 {total_ips} 个{iptype} IP")
+        print(f"合并后总共获取到 {total_ips} 个{iptype} IP（已去重且随机排序）")
         
         # 5. 构建返回数据，保持与原API相同的格式
         result = {
@@ -118,6 +160,7 @@ def get_optimization_ip():
                 "CM": merged_ips[iptype]["CM"],
                 "CU": merged_ips[iptype]["CU"],
                 "CT": merged_ips[iptype]["CT"]
+                # AB和DEF线路不处理
             }
         }
         
@@ -143,9 +186,6 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
         # IPs to remove (in existing_ips but not in new_ips)
         records_to_remove = [record for record in existing_records if record["value"] not in new_ips]
         
-        # IPs to keep (in both)
-        records_to_keep = [record for record in existing_records if record["value"] in new_ips]
-        
         # Delete records that are no longer needed
         for record in records_to_remove:
             ret = cloud.del_record(domain, record["recordId"])
@@ -170,10 +210,6 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
                 print(f"CREATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                       f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
                       f"----VALUE: {ip} ----MESSAGE: {ret.get('message', 'Unknown error')}")
-        
-        # For Huawei Cloud, if you need to update existing records (change IP values),
-        # you would need to delete and recreate them as Huawei doesn't support direct update
-        # of record values for existing record IDs
         
     except Exception as e:
         print(f"BATCH UPDATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
@@ -273,8 +309,7 @@ def main(cloud):
                     temp_cf_cmips = cf_cmips.copy()
                     temp_cf_cuips = cf_cuips.copy()
                     temp_cf_ctips = cf_ctips.copy()
-                    temp_cf_abips = cf_ctips.copy()
-                    temp_cf_defips = cf_ctips.copy()
+                    
                     if config["dns_server"] == 1:
                         ret = cloud.get_record(domain, 20, sub_domain, "CNAME")
                         if ret["code"] == 0:
@@ -292,23 +327,24 @@ def main(cloud):
                         cm_info = []
                         cu_info = []
                         ct_info = []
-                        ab_info = []
-                        def_info = []
                         
                         for record in ret["data"]["records"]:
-                            info = {}
-                            info["recordId"] = record["id"]
-                            info["value"] = record["value"]
+                            # 只处理移动、联通、电信线路
                             if record["line"] == "移动":
+                                info = {}
+                                info["recordId"] = record["id"]
+                                info["value"] = record["value"]
                                 cm_info.append(info)
                             elif record["line"] == "联通":
+                                info = {}
+                                info["recordId"] = record["id"]
+                                info["value"] = record["value"]
                                 cu_info.append(info)
                             elif record["line"] == "电信":
+                                info = {}
+                                info["recordId"] = record["id"]
+                                info["value"] = record["value"]
                                 ct_info.append(info)
-                            elif record["line"] == "境外":
-                                ab_info.append(info)
-                            elif record["line"] == "默认":
-                                def_info.append(info)
                         
                         for line in lines:
                             if line == "CM":
@@ -317,10 +353,7 @@ def main(cloud):
                                 changeDNS("CU", cu_info, temp_cf_cuips, domain, sub_domain, cloud)
                             elif line == "CT":
                                 changeDNS("CT", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
-                            elif line == "AB":
-                                changeDNS("AB", ab_info, temp_cf_abips, domain, sub_domain, cloud)
-                            elif line == "DEF":
-                                changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
+                            # AB和DEF线路不处理
         except Exception as e:
             traceback.print_exc()  
             print("CHANGE DNS ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----MESSAGE: " + str(traceback.print_exc()))
