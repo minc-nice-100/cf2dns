@@ -6,18 +6,19 @@ import sys
 import os
 import json
 import requests
-import time
-import random
 import traceback
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
-from huaweicloudsdkdns.v2 import *
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
-from huaweicloudsdkdns.v2.model.create_record_set_with_line_req import CreateRecordSetWithLineReq
-# 新增批量接口的导入
-from huaweicloudsdkdns.v2.model.batch_create_public_recordsets_task_request import BatchCreatePublicRecordsetsTaskRequest
-from huaweicloudsdkdns.v2.model.batch_create_public_recordsets_task_item import BatchCreatePublicRecordsetsTaskItem
-from huaweicloudsdkdns.v2.model.batch_create_public_recordsets_task_request_body import BatchCreatePublicRecordsetsTaskRequestBody
-
+# 统一从 model 包导入所需类
+from huaweicloudsdkdns.v2.model import (
+    CreateRecordSetWithLineReq,
+    DeleteRecordSetsRequest,
+    ListRecordSetsWithLineRequest,
+    ListPublicZonesRequest,
+    BatchCreatePublicRecordsetsTaskRequest,
+    BatchCreatePublicRecordsetsTaskItem,
+    BatchCreatePublicRecordsetsTaskRequestBody
+)
 # 读取环境变量
 config = json.loads(os.environ["CONFIG"])
 DOMAINS = json.loads(os.environ["DOMAINS"])
