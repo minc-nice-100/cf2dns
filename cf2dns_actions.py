@@ -12,6 +12,7 @@ import traceback
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkdns.v2 import *
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
+from huaweicloudsdkdns.v2.model.create_record_set_with_line_req import CreateRecordSetWithLineReq
 
 # 读取环境变量
 config = json.loads(os.environ["CONFIG"])
