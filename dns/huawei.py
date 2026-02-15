@@ -5,7 +5,6 @@
 # Reference2: https://support.huaweicloud.com/api-dns/dns_api_65003.html
 # REGION: https://developer.huaweicloud.com/endpoint
 
-from re import sub
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkdns.v2 import *
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
@@ -17,19 +16,23 @@ class HuaWeiApi():
         self.AK = ACCESSID
         self.SK = SECRETKEY
         self.region = REGION
-        self.client = DnsClient.new_builder().with_credentials(BasicCredentials(self.AK, self.SK)).with_region(DnsRegion.value_of(self.region)).build()
+        self.client = DnsClient.new_builder() \
+            .with_credentials(BasicCredentials(self.AK, self.SK)) \
+            .with_region(DnsRegion.value_of(self.region)) \
+            .build()
         self.zone_id = self.get_zones()
 
     def del_record(self, domain, record):
+        """删除单条记录"""
         request = DeleteRecordSetsRequest()
         request.zone_id = self.zone_id[domain + '.']
         request.recordset_id = record
         response = self.client.delete_record_sets(request)
         result = json.loads(str(response))
-        print(result)
         return result
 
     def get_record(self, domain, length, sub_domain, record_type):
+        """获取记录列表（修正版-去除固定IP）"""
         request = ListRecordSetsWithLineRequest()
         request.limit = length
         request.type = record_type
@@ -44,31 +47,46 @@ class HuaWeiApi():
         for record in data['recordsets']:
             if (sub_domain == '@' and domain + "." == record['name']) or (sub_domain + '.' + domain + "." == record['name']):
                 record['line'] = self.line_format(record['line'])
-                record['value'] = '1.1.1.1'
+                # 修正：不再固定赋值，保留真实IP
                 records_temp.append(record)
         result['data'] = {'records': records_temp}
+        result['code'] = 0
         return result
 
-    def create_record(self, domain, sub_domain, value, record_type, line, ttl):
+    def create_record(self, domain, sub_domain, values, record_type, line, ttl):
+        """
+        创建记录集（增强版-支持批量IP）
+        :param values: 可以是单个IP字符串，也可以是IP字符串列表
+        """
         request = CreateRecordSetWithLineRequest()
         request.zone_id = self.zone_id[domain + '.']
         if sub_domain == '@':
             name = domain + "."
         else:
             name = sub_domain + '.' + domain + "."
+        
+        # 确保values总是列表
+        if isinstance(values, str):
+            records_list = [values]
+        else:
+            records_list = values
+        
         request.body = CreateRecordSetWithLineReq(
-            type = record_type,
-            name = name,
-            ttl = ttl,
-            weight = 1,
-            records = [value],
-            line = self.line_format(line)
+            type=record_type,
+            name=name,
+            ttl=ttl,
+            records=records_list,  # 直接传入IP列表
+            line=self.line_format(line)
         )
         response = self.client.create_record_set_with_line(request)
         result = json.loads(str(response))
         return result
         
-    def change_record(self, domain, record_id, sub_domain, value, record_type, line, ttl):
+    def change_record(self, domain, record_id, sub_domain, values, record_type, line, ttl):
+        """
+        修改记录集（增强版-支持批量IP）
+        :param values: 可以是单个IP字符串，也可以是IP字符串列表
+        """
         request = UpdateRecordSetRequest()
         request.zone_id = self.zone_id[domain + '.']
         request.recordset_id = record_id
@@ -76,17 +94,25 @@ class HuaWeiApi():
             name = domain + "."
         else:
             name = sub_domain + '.' + domain + "."
+        
+        # 确保values总是列表
+        if isinstance(values, str):
+            records_list = [values]
+        else:
+            records_list = values
+        
         request.body = UpdateRecordSetReq(
-            name = name,
-            type = record_type,
-            ttl = ttl,
-            records=[value]
+            name=name,
+            type=record_type,
+            ttl=ttl,
+            records=records_list  # 直接传入IP列表
         )
         response = self.client.update_record_set(request)
         result = json.loads(str(response))
         return result
 
     def get_zones(self):
+        """获取域名zone_id"""
         request = ListPublicZonesRequest()
         response = self.client.list_public_zones(request)
         result = json.loads(str(response))
@@ -96,105 +122,25 @@ class HuaWeiApi():
         return zone_id
 
     def line_format(self, line):
+        """线路格式转换"""
         lines = {
-            '默认' : 'default_view',
-            '电信' : 'Dianxin',
-            '联通' : 'Liantong',
-            '移动' : 'Yidong',
-            '境外' : 'Abroad',
-            'default_view' : '默认',
-            'Dianxin' : '电信',
-            'Liantong' : '联通',
-            'Yidong' : '移动',
-            'Abroad' : '境外',
+            '默认': 'default_view',
+            '电信': 'Dianxin',
+            '联通': 'Liantong',
+            '移动': 'Yidong',
+            '境外': 'Abroad',
+            'default_view': '默认',
+            'Dianxin': '电信',
+            'Liantong': '联通',
+            'Yidong': '移动',
+            'Abroad': '境外',
         }
-        return lines.get(line, None)
+        return lines.get(line, line)
 
-    # 添加到 dns/huawei.py 中的 HuaWeiApi 类
-
-    def batch_delete_records(self, zone_id, record_ids):
-        """
-        批量删除记录集
-        API: BatchDeleteRecordSetWithLine
-        """
-        try:
-            url = f"{self.endpoint}/v2.1/zones/{zone_id}/recordsets/batch/delete"
-            
-            payload = {
-                "recordset_ids": record_ids
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "X-Auth-Token": self.token
-            }
-            
-            response = requests.post(url, headers=headers, json=payload)
-            
-            if response.status_code == 202:
-                return {"code": 0, "message": "success", "data": response.json()}
-            else:
-                return {"code": response.status_code, "message": response.text}
-        except Exception as e:
-            return {"code": 500, "message": str(e)}
-    
-    def batch_create_records(self, zone_id, name, record_type, line, records, ttl=300):
-        """
-        批量创建记录集
-        API: CreateRecordSetWithBatchLines
-        """
-        try:
-            url = f"{self.endpoint}/v2.1/zones/{zone_id}/recordsets/batch/lines"
-            
-            payload = {
-                "name": name,
-                "type": record_type,
-                "ttl": ttl,
-                "records": records,
-                "line": line
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "X-Auth-Token": self.token
-            }
-            
-            response = requests.post(url, headers=headers, json=payload)
-            
-            if response.status_code == 202:
-                return {"code": 0, "message": "success", "data": response.json()}
-            else:
-                return {"code": response.status_code, "message": response.text}
-        except Exception as e:
-            return {"code": 500, "message": str(e)}
-    
-    def batch_update_records(self, zone_id, record_sets):
-        """
-        批量修改记录集
-        API: BatchUpdateRecordSetWithLine
-        record_sets: [{"id": "record_id", "records": ["new_ip1", "new_ip2"], "ttl": 600}, ...]
-        """
-        try:
-            url = f"{self.endpoint}/v2.1/zones/{zone_id}/recordsets/batch/update"
-            
-            payload = {
-                "recordsets": record_sets
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "X-Auth-Token": self.token
-            }
-            
-            response = requests.post(url, headers=headers, json=payload)
-            
-            if response.status_code == 202:
-                return {"code": 0, "message": "success", "data": response.json()}
-            else:
-                return {"code": response.status_code, "message": response.text}
-        except Exception as e:
-            return {"code": 500, "message": str(e)}
 
 if __name__ == '__main__':
-    hw_api = HuaWeiApi('WTTCWxxxxxxxxx84O0V', 'GXkG6D4X1Nxxxxxxxxxxxxxxxxxxxxx4lRg6lT')
-    print(hw_api.get_record('xxxx.com', 100, '@', 'A'))
+    # 测试代码
+    hw_api = HuaWeiApi('YOUR_ACCESS_KEY', 'YOUR_SECRET_KEY')
+    # 测试获取记录
+    result = hw_api.get_record('example.com', 100, '@', 'A')
+    print(json.dumps(result, indent=2, ensure_ascii=False))
