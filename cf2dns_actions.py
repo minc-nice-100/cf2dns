@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Mail: tongdongdong@outlook.com
+# 纯HTTP请求实现华为云DNS记录更新，不依赖SDK
 
 import sys
 import os
 import json
+import time
+import hmac
+import hashlib
+import base64
 import requests
 import traceback
-from huaweicloudsdkcore.auth.credentials import BasicCredentials
-from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
-from huaweicloudsdkdns.v2 import DnsClient  # 修复：添加关键的DnsClient导入
-# 统一从 model 包导入所需类（修复类名错误）
-from huaweicloudsdkdns.v2.model import (
-    CreateRecordSetWithLineRequest,  # 修复：替换 CreateRecordSetWithLineReq 为正确类名
-    DeleteRecordSetsRequest,
-    ListRecordSetsWithLineRequest,
-    ListPublicZonesRequest,
-    BatchCreatePublicRecordsetsTaskRequest,
-    BatchCreatePublicRecordsetsTaskItem,
-    BatchCreatePublicRecordsetsTaskRequestBody,
-    CreateRecordSetWithLineRequestBody  # 新增：导入请求体类
-)
+from datetime import datetime
 
 # 读取环境变量（添加异常处理）
 try:
@@ -38,8 +30,8 @@ NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
 DEFAULT_CONFIG = {
     "key": "",
     "data_server": "",
-    "secretid": "",
-    "secretkey": "",
+    "secretid": "",  # 华为云AK
+    "secretkey": "", # 华为云SK
     "region_hw": "cn-east-3",
     "ipv4": "on",
     "ipv6": "off",
@@ -49,188 +41,225 @@ DEFAULT_CONFIG = {
 # 合并配置，使用默认值填充缺失项
 config = {**DEFAULT_CONFIG, **config}
 
+# 华为云DNS API基础配置
+DNS_API_BASE = "https://dns.{}.myhuaweicloud.com/v2".format(config["region_hw"])
+# 线路映射（华为云DNS API使用的线路编码）
+LINE_MAPPING = {
+    '默认': 'default_view',
+    '电信': 'Dianxin',
+    '联通': 'Liantong',
+    '移动': 'Yidong',
+    '境外': 'Abroad',
+    'default_view': '默认',
+    'Dianxin': '电信',
+    'Liantong': '联通',
+    'Yidong': '移动',
+    'Abroad': '境外',
+}
 
-class HuaWeiApi:
-    """华为云DNS API封装（V3版本）"""
+
+class HuaweiDNSAPI:
+    """华为云DNS API封装（纯HTTP请求版）"""
     
-    def __init__(self, ACCESSID, SECRETKEY, REGION='cn-east-3'):
-        self.AK = ACCESSID
-        self.SK = SECRETKEY
-        self.region = REGION
-        
-        try:
-            credentials = BasicCredentials(self.AK, self.SK)
-            self.client = DnsClient.new_builder() \
-                .with_credentials(credentials) \
-                .with_region(DnsRegion.value_of(self.region)) \
-                .build()
-        except Exception as e:
-            print(f"初始化华为云客户端失败: {e}")
-            raise
-        
-        self.zone_id = self.get_zones()
-        if not self.zone_id:
-            print("警告：未获取到任何域名的zone_id")
-
-    def del_record(self, domain, record_id):
-        """删除单条记录集"""
-        try:
-            request = DeleteRecordSetsRequest()
-            request.zone_id = self.zone_id.get(domain + '.')
-            if not request.zone_id:
-                return {"code": 404, "message": f"域名{domain}不存在"}
-            
-            request.recordset_id = record_id
-            response = self.client.delete_record_sets(request)
-            # 修复：华为云SDK响应对象处理
-            response_dict = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
-            return {"code": 0, "data": response_dict}
-        except Exception as e:
-            return {"code": 500, "message": str(e), "trace": traceback.format_exc()}
-
-    def get_record(self, domain, length, sub_domain, record_type):
-        """获取记录集列表"""
-        try:
-            request = ListRecordSetsWithLineRequest()
-            request.limit = length
-            request.type = record_type
-            
-            if sub_domain == '@':
-                request.name = domain + "."
-            else:
-                request.name = sub_domain + '.' + domain + "."
-            
-            response = self.client.list_record_sets_with_line(request)
-            # 修复：统一响应解析方式
-            data = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
-            
-            result = {'data': {'records': []}, 'code': 0}
-            
-            for record in data.get('recordsets', []):
-                record_name = record.get('name', '')
-                expected_name = (domain + '.') if sub_domain == '@' else (sub_domain + '.' + domain + '.')
-                
-                if record_name == expected_name and record.get('type') == record_type:
-                    # 转换线路格式
-                    record['line'] = self.line_format(record.get('line', 'default_view'))
-                    
-                    # 为每个IP创建一条记录
-                    records_list = record.get('records', [])
-                    for ip in records_list:
-                        record_item = {
-                            'id': record.get('id'),
-                            'line': record['line'],
-                            'value': ip,
-                            'type': record.get('type'),
-                            'ttl': record.get('ttl'),
-                            'name': record.get('name')
-                        }
-                        result['data']['records'].append(record_item)
-            
-            return result
-        except Exception as e:
-            return {"code": 500, "data": {"records": []}, "message": str(e), "trace": traceback.format_exc()}
-
-    def create_record(self, domain, sub_domain, values, record_type, line, ttl):
-        """创建记录集（支持批量IP）- 保留单个创建方法，但主流程已改用批量接口"""
-        try:
-            request = CreateRecordSetWithLineRequest()  # 修复：类名修正
-            request.zone_id = self.zone_id.get(domain + '.')
-            if not request.zone_id:
-                return {"code": 404, "message": f"域名{domain}不存在"}
-            
-            if sub_domain == '@':
-                name = domain + "."
-            else:
-                name = sub_domain + '.' + domain + "."
-            
-            # 确保values是列表
-            if isinstance(values, str):
-                records_list = [values]
-            else:
-                records_list = values
-            
-            # 修复：使用正确的请求体类 CreateRecordSetWithLineRequestBody
-            request.body = CreateRecordSetWithLineRequestBody(
-                type=record_type,
-                name=name,
-                ttl=ttl,
-                records=records_list,
-                line=self.line_format(line)
-            )
-            
-            response = self.client.create_record_set_with_line(request)
-            response_dict = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
-            return {"code": 0, "data": response_dict}
-        except Exception as e:
-            return {"code": 500, "message": str(e), "trace": traceback.format_exc()}
-
-    def batch_create_records(self, domain, recordsets):
+    def __init__(self, ak, sk, region):
+        self.ak = ak
+        self.sk = sk
+        self.region = region
+        self.base_url = DNS_API_BASE
+        self.zone_ids = self._get_all_zone_ids()  # 缓存域名zone_id映射
+    
+    def _sign_request(self, method, path, params=None, body=None):
         """
-        批量创建记录集（属于同一个域名）
-        :param domain: 域名（如 example.com）
-        :param recordsets: 记录集列表，每个元素为字典，包含 name, type, records, ttl, line
+        生成华为云API请求签名（参考官方文档：https://support.huaweicloud.com/devg-apisign/api-sign-provide.html）
         """
-        try:
-            zone_id = self.zone_id.get(domain + '.')
-            if not zone_id:
-                return {"code": 404, "message": f"域名{domain}不存在"}
-            
-            request = BatchCreatePublicRecordsetsTaskRequest()
-            request.zone_id = zone_id
-            
-            # 构建记录集列表
-            items = []
-            for rs in recordsets:
-                # 线路字段需转换为SDK能识别的代码（如 '移动' -> 'Yidong'）
-                line_code = self.line_format(rs['line'])  # 利用已有方法转换
-                item = BatchCreatePublicRecordsetsTaskItem(
-                    name=rs['name'],
-                    type=rs['type'],
-                    records=rs['records'],
-                    ttl=rs['ttl'],
-                    line=line_code
-                )
-                items.append(item)
-            
-            request.body = BatchCreatePublicRecordsetsTaskRequestBody(recordsets=items)
-            response = self.client.batch_create_public_recordsets_task(request)
-            # 返回响应字典（通常包含 task_id）
-            response_dict = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
-            return {"code": 0, "data": response_dict}
-        except Exception as e:
-            return {"code": 500, "message": str(e), "trace": traceback.format_exc()}
-
-    def get_zones(self):
-        """获取所有公网域名的zone_id映射"""
-        try:
-            request = ListPublicZonesRequest()
-            response = self.client.list_public_zones(request)
-            result = response.to_dict() if hasattr(response, 'to_dict') else json.loads(str(response))
-            
-            zone_id = {}
-            for zone in result.get('zones', []):
-                zone_id[zone['name']] = zone['id']
-            return zone_id
-        except Exception as e:
-            print(f"获取域名列表失败: {e}")
-            return {}
-
-    def line_format(self, line):
-        """线路格式转换（双向映射）"""
-        lines = {
-            '默认': 'default_view',
-            '电信': 'Dianxin',
-            '联通': 'Liantong',
-            '移动': 'Yidong',
-            '境外': 'Abroad',
-            'default_view': '默认',
-            'Dianxin': '电信',
-            'Liantong': '联通',
-            'Yidong': '移动',
-            'Abroad': '境外',
+        # 1. 构造请求时间
+        now = datetime.utcnow()
+        date = now.strftime("%Y%m%dT%H%M%SZ")
+        # 2. 构造待签名字符串
+        headers = {
+            "Content-Type": "application/json;charset=utf8",
+            "X-Project-Id": "",  # 留空，由API网关自动填充
+            "X-Sdk-Date": date,
+            "Host": f"dns.{self.region}.myhuaweicloud.com"
         }
-        return lines.get(line, line)
+        
+        # 构造请求URI
+        query_string = ""
+        if params:
+            query_items = sorted(params.items())
+            query_string = "&".join([f"{k}={v}" for k, v in query_items])
+        
+        # 构造请求体（如果有）
+        body_str = ""
+        if body and method in ["POST", "PUT", "PATCH"]:
+            body_str = json.dumps(body, separators=(',', ':'))  # 紧凑格式，无空格
+        
+        # 构造待签名的字符串
+        sign_string = f"{method}\n{path}\n{query_string}\n{headers['Content-Type']}\n{headers['X-Sdk-Date']}\n"
+        sign_string += body_str if body_str else ""
+        
+        # 3. 使用SK进行HMAC-SHA256签名
+        signature = hmac.new(
+            self.sk.encode('utf-8'),
+            sign_string.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        signature_b64 = base64.b64encode(signature).decode('utf-8')
+        
+        # 4. 构造Authorization头
+        auth_header = f"SDK-HMAC-SHA256 Access={self.ak}, SignedHeaders=content-type;host;x-sdk-date, Signature={signature_b64}"
+        headers["Authorization"] = auth_header
+        
+        return headers
+    
+    def _http_request(self, method, path, params=None, body=None):
+        """发送HTTP请求并处理响应"""
+        try:
+            url = f"{self.base_url}{path}"
+            headers = self._sign_request(method, path, params, body)
+            
+            # 发送请求
+            if method == "GET":
+                resp = requests.get(url, headers=headers, params=params, timeout=10)
+            elif method == "DELETE":
+                resp = requests.delete(url, headers=headers, timeout=10)
+            elif method == "POST":
+                resp = requests.post(url, headers=headers, json=body, timeout=10)
+            else:
+                return {"code": 400, "message": f"不支持的请求方法：{method}"}
+            
+            # 处理响应
+            if resp.status_code in [200, 201, 202, 204]:
+                try:
+                    return {"code": 0, "data": resp.json() if resp.content else {}}
+                except:
+                    return {"code": 0, "data": {}}
+            else:
+                return {
+                    "code": resp.status_code,
+                    "message": f"API请求失败: {resp.status_code} - {resp.text}"
+                }
+        except Exception as e:
+            return {"code": 500, "message": f"网络请求异常: {str(e)}"}
+    
+    def _get_all_zone_ids(self):
+        """获取所有公网域名的zone_id映射"""
+        path = "/publiczones"
+        resp = self._http_request("GET", path)
+        if resp["code"] != 0:
+            print(f"获取域名列表失败: {resp['message']}")
+            return {}
+        
+        zone_map = {}
+        for zone in resp["data"].get("zones", []):
+            zone_map[zone["name"]] = zone["id"]
+        return zone_map
+    
+    def get_zone_id(self, domain):
+        """获取单个域名的zone_id（自动补全末尾的点）"""
+        domain_key = domain if domain.endswith('.') else f"{domain}."
+        return self.zone_ids.get(domain_key)
+    
+    def get_record_sets(self, domain, sub_domain, record_type):
+        """获取指定域名、子域名、类型的记录集列表"""
+        zone_id = self.get_zone_id(domain)
+        if not zone_id:
+            return {"code": 404, "message": f"域名{domain}不存在"}
+        
+        # 构造记录名称
+        if sub_domain == '@':
+            record_name = f"{domain}."
+        else:
+            record_name = f"{sub_domain}.{domain}."
+        
+        # 调用API获取记录集
+        params = {
+            "type": record_type,
+            "name": record_name,
+            "limit": 100
+        }
+        path = f"/publiczones/{zone_id}/recordsets"
+        resp = self._http_request("GET", path, params=params)
+        
+        if resp["code"] != 0:
+            return resp
+        
+        # 格式化返回结果
+        result = {"code": 0, "data": {"records": []}}
+        for record in resp["data"].get("recordsets", []):
+            # 转换线路名称
+            line = LINE_MAPPING.get(record.get("line", "default_view"), "default_view")
+            # 为每个IP拆分记录
+            for ip in record.get("records", []):
+                result["data"]["records"].append({
+                    "id": record["id"],
+                    "line": line,
+                    "value": ip,
+                    "type": record["type"],
+                    "ttl": record["ttl"],
+                    "name": record["name"]
+                })
+        return result
+    
+    def delete_record_set(self, domain, recordset_id):
+        """删除指定的记录集"""
+        zone_id = self.get_zone_id(domain)
+        if not zone_id:
+            return {"code": 404, "message": f"域名{domain}不存在"}
+        
+        path = f"/publiczones/{zone_id}/recordsets/{recordset_id}"
+        return self._http_request("DELETE", path)
+    
+    def create_record_set(self, domain, sub_domain, values, record_type, line, ttl):
+        """创建单个记录集"""
+        zone_id = self.get_zone_id(domain)
+        if not zone_id:
+            return {"code": 404, "message": f"域名{domain}不存在"}
+        
+        # 构造记录名称
+        if sub_domain == '@':
+            record_name = f"{domain}."
+        else:
+            record_name = f"{sub_domain}.{domain}."
+        
+        # 确保values是列表
+        records = [values] if isinstance(values, str) else values
+        # 转换线路编码
+        line_code = LINE_MAPPING.get(line, "default_view")
+        
+        # 构造请求体
+        body = {
+            "name": record_name,
+            "type": record_type,
+            "ttl": ttl,
+            "records": records,
+            "line": line_code
+        }
+        
+        path = f"/publiczones/{zone_id}/recordsets"
+        return self._http_request("POST", path, body=body)
+    
+    def batch_create_record_sets(self, domain, recordsets):
+        """批量创建记录集"""
+        zone_id = self.get_zone_id(domain)
+        if not zone_id:
+            return {"code": 404, "message": f"域名{domain}不存在"}
+        
+        # 构造批量请求体
+        batch_body = {"recordsets": []}
+        for rs in recordsets:
+            # 转换线路编码
+            line_code = LINE_MAPPING.get(rs["line"], "default_view")
+            batch_body["recordsets"].append({
+                "name": rs["name"],
+                "type": rs["type"],
+                "ttl": rs["ttl"],
+                "records": rs["records"],
+                "line": line_code
+            })
+        
+        path = f"/publiczones/{zone_id}/recordsets/batch-create"
+        return self._http_request("POST", path, body=batch_body)
 
 
 def get_optimization_ip(iptype):
@@ -242,7 +271,6 @@ def get_optimization_ip(iptype):
         # 1. 从原API获取IP信息
         try:
             data = {"key": config["key"], "type": iptype}
-            # 修复：处理provider_data为空的情况
             provider = next((p for p in provider_data if p.get('id') == config["data_server"]), None)
             if provider and provider.get('get_ip_url'):
                 response = requests.post(provider['get_ip_url'], json=data, headers=headers, timeout=10)
@@ -317,7 +345,7 @@ def get_optimization_ip(iptype):
         return None
 
 
-def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
+def update_carrier_records(dns_api, domain, sub_domain, lines, all_ips, ttl):
     """更新移动、联通、电信的A和AAAA记录（删除旧记录 + 批量添加新记录）"""
     try:
         # 要处理的线路映射
@@ -336,7 +364,7 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
         existing_records = {"A": {}, "AAAA": {}}
         
         for record_type in record_types:
-            ret = cloud.get_record(domain, 100, sub_domain, record_type)
+            ret = dns_api.get_record_sets(domain, sub_domain, record_type)
             if ret.get("code") == 0:
                 for record in ret.get("data", {}).get("records", []):
                     line = record["line"]
@@ -353,7 +381,7 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
         deleted_count = 0
         for record_type in record_types:
             for record_id, record_info in existing_records[record_type].items():
-                ret = cloud.del_record(domain, record_id)
+                ret = dns_api.delete_record_set(domain, record_id)
                 if ret.get("code") == 0:
                     print(f"✓ 删除旧{record_type}记录: {record_info['line']} - {record_info['ips']}")
                     deleted_count += 1
@@ -367,9 +395,9 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
         records_to_create = []
         # 构造完整记录名称
         if sub_domain == '@':
-            full_name = domain + "."
+            full_name = f"{domain}."
         else:
-            full_name = sub_domain + '.' + domain + "."
+            full_name = f"{sub_domain}.{domain}."
         
         # 处理配置中指定的线路
         for line in lines:
@@ -412,7 +440,7 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
         
         # 批量创建新记录集
         if records_to_create:
-            ret = cloud.batch_create_records(domain, records_to_create)
+            ret = dns_api.batch_create_record_sets(domain, records_to_create)
             # 判断是否成功
             if ret.get("code") == 0:
                 print(f"✓ 批量创建成功，创建了 {len(records_to_create)} 条记录集")
@@ -443,15 +471,17 @@ def main():
         print("错误：华为云密钥配置不完整")
         sys.exit(1)
     
-    # 初始化华为云客户端
+    # 初始化华为云DNS API客户端
     try:
-        cloud = HuaWeiApi(
+        dns_api = HuaweiDNSAPI(
             config["secretid"],
             config["secretkey"],
-            config.get("region_hw", "cn-east-3")
+            config["region_hw"]
         )
+        if not dns_api.zone_ids:
+            print("警告：未获取到任何域名的zone_id，请检查AK/SK权限和区域配置")
     except Exception as e:
-        print(f"初始化华为云客户端失败: {e}")
+        print(f"初始化DNS API客户端失败: {e}")
         sys.exit(1)
     
     print("=" * 60)
@@ -490,7 +520,7 @@ def main():
             # 检查是否有运营商线路
             has_carrier = any(line in ["CM", "CU", "CT"] for line in lines)
             if has_carrier:
-                update_carrier_records(cloud, domain, sub_domain, lines, all_ips, config["ttl"])
+                update_carrier_records(dns_api, domain, sub_domain, lines, all_ips, config["ttl"])
             else:
                 print(f"跳过 {domain} - {sub_domain}（没有配置运营商线路）")
 
