@@ -32,7 +32,7 @@ class HuaWeiApi():
         return result
 
     def get_record(self, domain, length, sub_domain, record_type):
-        """获取记录列表（修正版-去除固定IP）"""
+        """获取记录列表（修正版-适配华为云实际返回格式）"""
         request = ListRecordSetsWithLineRequest()
         request.limit = length
         request.type = record_type
@@ -40,15 +40,41 @@ class HuaWeiApi():
             request.name = domain + "."
         else:
             request.name = sub_domain + '.' + domain + "."
+        
         response = self.client.list_record_sets_with_line(request)
         data = json.loads(str(response))
+        
         result = {}
         records_temp = []
-        for record in data['recordsets']:
-            if (sub_domain == '@' and domain + "." == record['name']) or (sub_domain + '.' + domain + "." == record['name']):
-                record['line'] = self.line_format(record['line'])
-                # 修正：不再固定赋值，保留真实IP
-                records_temp.append(record)
+        
+        # 调试：打印返回的数据结构
+        # print(f"华为云API返回: {json.dumps(data, indent=2)}")
+        
+        for record in data.get('recordsets', []):
+            # 检查是否匹配当前子域名
+            record_name = record.get('name', '')
+            expected_name = (domain + '.') if sub_domain == '@' else (sub_domain + '.' + domain + '.')
+            
+            if record_name == expected_name and record.get('type') == record_type:
+                # 转换线路格式
+                record['line'] = self.line_format(record.get('line', 'default_view'))
+                
+                # 华为云的记录值在 'records' 字段中，是一个列表
+                # 我们需要为每个IP创建一条记录（保持与原逻辑兼容）
+                records_list = record.get('records', [])
+                
+                # 如果这个记录集有多个IP，为每个IP创建一个记录项
+                for ip in records_list:
+                    record_item = {
+                        'id': record.get('id'),
+                        'line': record['line'],
+                        'value': ip,  # 使用单个IP作为value
+                        'type': record.get('type'),
+                        'ttl': record.get('ttl'),
+                        'name': record.get('name')
+                    }
+                    records_temp.append(record_item)
+        
         result['data'] = {'records': records_temp}
         result['code'] = 0
         return result
@@ -117,7 +143,7 @@ class HuaWeiApi():
         response = self.client.list_public_zones(request)
         result = json.loads(str(response))
         zone_id = {}
-        for zone in result['zones']:
+        for zone in result.get('zones', []):
             zone_id[zone['name']] = zone['id'] 
         return zone_id
 
