@@ -13,6 +13,10 @@ from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkdns.v2 import *
 from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
 from huaweicloudsdkdns.v2.model.create_record_set_with_line_req import CreateRecordSetWithLineReq
+# 新增批量接口的导入
+from huaweicloudsdkdns.v2.model.batch_create_public_recordsets_task_request import BatchCreatePublicRecordsetsTaskRequest
+from huaweicloudsdkdns.v2.model.batch_create_public_recordsets_task_item import BatchCreatePublicRecordsetsTaskItem
+from huaweicloudsdkdns.v2.model.batch_create_public_recordsets_task_request_body import BatchCreatePublicRecordsetsTaskRequestBody
 
 # 读取环境变量
 config = json.loads(os.environ["CONFIG"])
@@ -97,7 +101,7 @@ class HuaWeiApi:
             return {"code": 500, "data": {"records": []}, "message": str(e)}
 
     def create_record(self, domain, sub_domain, values, record_type, line, ttl):
-        """创建记录集（支持批量IP）"""
+        """创建记录集（支持批量IP）- 保留单个创建方法，但主流程已改用批量接口"""
         try:
             request = CreateRecordSetWithLineRequest()
             request.zone_id = self.zone_id.get(domain + '.')
@@ -128,6 +132,41 @@ class HuaWeiApi:
         except Exception as e:
             return {"code": 500, "message": str(e)}
 
+    def batch_create_records(self, domain, recordsets):
+        """
+        批量创建记录集（属于同一个域名）
+        :param domain: 域名（如 example.com）
+        :param recordsets: 记录集列表，每个元素为字典，包含 name, type, records, ttl, line
+        """
+        try:
+            zone_id = self.zone_id.get(domain + '.')
+            if not zone_id:
+                return {"code": 404, "message": f"域名{domain}不存在"}
+            
+            request = BatchCreatePublicRecordsetsTaskRequest()
+            request.zone_id = zone_id
+            
+            # 构建记录集列表
+            items = []
+            for rs in recordsets:
+                # 线路字段需转换为SDK能识别的代码（如 '移动' -> 'Yidong'）
+                line_code = self.line_format(rs['line'])  # 利用已有方法转换
+                item = BatchCreatePublicRecordsetsTaskItem(
+                    name=rs['name'],
+                    type=rs['type'],
+                    records=rs['records'],
+                    ttl=rs['ttl'],
+                    line=line_code
+                )
+                items.append(item)
+            
+            request.body = BatchCreatePublicRecordsetsTaskRequestBody(recordsets=items)
+            response = self.client.batch_create_public_recordsets_task(request)
+            # 返回响应字典（通常包含 task_id）
+            return json.loads(str(response))
+        except Exception as e:
+            return {"code": 500, "message": str(e)}
+
     def get_zones(self):
         """获取所有公网域名的zone_id映射"""
         try:
@@ -144,7 +183,7 @@ class HuaWeiApi:
             return {}
 
     def line_format(self, line):
-        """线路格式转换"""
+        """线路格式转换（双向映射）"""
         lines = {
             '默认': 'default_view',
             '电信': 'Dianxin',
@@ -241,7 +280,7 @@ def get_optimization_ip(iptype):
 
 
 def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
-    """更新移动、联通、电信的A和AAAA记录（删除旧记录 + 添加新记录）"""
+    """更新移动、联通、电信的A和AAAA记录（删除旧记录 + 批量添加新记录）"""
     try:
         # 要处理的线路映射
         line_mapping = {
@@ -286,8 +325,13 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
         if deleted_count > 0:
             print(f"已删除 {deleted_count} 条旧记录")
         
-        # 添加新记录
-        created_count = 0
+        # 准备要批量创建的新记录集
+        records_to_create = []
+        # 构造完整记录名称
+        if sub_domain == '@':
+            full_name = domain + "."
+        else:
+            full_name = sub_domain + '.' + domain + "."
         
         # 处理配置中指定的线路
         for line in lines:
@@ -296,54 +340,62 @@ def update_carrier_records(cloud, domain, sub_domain, lines, all_ips, ttl):
                 
             line_chinese = line_mapping[line]
             
-            # 获取新IP
-            new_ips_v4 = []
-            new_ips_v6 = []
-            
+            # 获取新IP（IPv4）
+            ip_list_v4 = []
             if all_ips.get("v4") and all_ips["v4"].get("code") == 200:
                 if line == "CM":
-                    new_ips_v4 = all_ips["v4"]["info"]["CM"]
+                    ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"]["CM"]]
                 elif line == "CU":
-                    new_ips_v4 = all_ips["v4"]["info"]["CU"]
+                    ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"]["CU"]]
                 elif line == "CT":
-                    new_ips_v4 = all_ips["v4"]["info"]["CT"]
+                    ip_list_v4 = [ip["ip"] for ip in all_ips["v4"]["info"]["CT"]]
+                if ip_list_v4:
+                    if len(ip_list_v4) > config["affect_num"]:
+                        ip_list_v4 = ip_list_v4[:config["affect_num"]]
+                    # 添加A记录集
+                    records_to_create.append({
+                        "name": full_name,
+                        "type": "A",
+                        "records": ip_list_v4,
+                        "ttl": ttl,
+                        "line": line_chinese  # 传入中文，batch方法中会转换
+                    })
             
+            # 获取新IP（IPv6）
+            ip_list_v6 = []
             if all_ips.get("v6") and all_ips["v6"].get("code") == 200:
                 if line == "CM":
-                    new_ips_v6 = all_ips["v6"]["info"]["CM"]
+                    ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"]["CM"]]
                 elif line == "CU":
-                    new_ips_v6 = all_ips["v6"]["info"]["CU"]
+                    ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"]["CU"]]
                 elif line == "CT":
-                    new_ips_v6 = all_ips["v6"]["info"]["CT"]
-            
-            # 添加A记录（IPv4）
-            if new_ips_v4:
-                ip_list = [ip["ip"] for ip in new_ips_v4]
-                if len(ip_list) > config["affect_num"]:
-                    ip_list = ip_list[:config["affect_num"]]
-                
-                ret = cloud.create_record(domain, sub_domain, ip_list, "A", line_chinese, ttl)
-                if ret.get("code") == 0 or "code" not in ret:
-                    print(f"✓ 创建新A记录: {line_chinese} - {ip_list}")
-                    created_count += 1
-                else:
-                    print(f"✗ 创建A记录失败: {line_chinese} - {ret.get('message', '未知错误')}")
-            
-            # 添加AAAA记录（IPv6）
-            if new_ips_v6:
-                ip_list = [ip["ip"] for ip in new_ips_v6]
-                if len(ip_list) > config["affect_num"]:
-                    ip_list = ip_list[:config["affect_num"]]
-                
-                ret = cloud.create_record(domain, sub_domain, ip_list, "AAAA", line_chinese, ttl)
-                if ret.get("code") == 0 or "code" not in ret:
-                    print(f"✓ 创建新AAAA记录: {line_chinese} - {ip_list}")
-                    created_count += 1
-                else:
-                    print(f"✗ 创建AAAA记录失败: {line_chinese} - {ret.get('message', '未知错误')}")
+                    ip_list_v6 = [ip["ip"] for ip in all_ips["v6"]["info"]["CT"]]
+                if ip_list_v6:
+                    if len(ip_list_v6) > config["affect_num"]:
+                        ip_list_v6 = ip_list_v6[:config["affect_num"]]
+                    # 添加AAAA记录集
+                    records_to_create.append({
+                        "name": full_name,
+                        "type": "AAAA",
+                        "records": ip_list_v6,
+                        "ttl": ttl,
+                        "line": line_chinese  # 传入中文，batch方法中会转换
+                    })
         
-        if created_count > 0:
-            print(f"已创建 {created_count} 条新记录")
+        # 批量创建新记录集
+        if records_to_create:
+            ret = cloud.batch_create_records(domain, records_to_create)
+            # 判断是否成功（通常返回字典包含 task_id）
+            if isinstance(ret, dict) and ("task_id" in ret or "code" not in ret):
+                print(f"✓ 批量创建成功，创建了 {len(records_to_create)} 条记录集")
+                for rs in records_to_create:
+                    print(f"  - {rs['type']} {rs['line']}: {rs['records']}")
+                if "task_id" in ret:
+                    print(f"  任务ID: {ret['task_id']}")
+            else:
+                print(f"✗ 批量创建失败: {ret.get('message', '未知错误')}")
+        else:
+            print("没有需要创建的新记录")
         
         print(f"完成 {domain} - {sub_domain} 的运营商记录更新\n")
         
@@ -367,7 +419,7 @@ def main():
     
     print("=" * 60)
     print("开始更新移动、联通、电信的A和AAAA记录")
-    print("（删除旧记录 + 添加新记录）")
+    print("（删除旧记录 + 批量添加新记录）")
     print("其他线路（境外、默认）保持不变")
     print("=" * 60)
     
