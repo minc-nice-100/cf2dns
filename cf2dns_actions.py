@@ -191,25 +191,55 @@ def get_optimization_ip():
         traceback.print_exc()
         return None
 
-def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existing_records, new_ips, ttl):
+def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existing_records, new_ips, ttl, affect_num):
     """
-    Batch update DNS records for Huawei Cloud
+    Batch update DNS records for Huawei Cloud with proper cleanup
     """
     try:
-        # For Huawei Cloud, we need to handle batch operations differently
-        # First, identify records to keep, update, and delete
+        # 获取现有IP列表
         existing_ips = [record["value"] for record in existing_records]
         
-        # IPs to add (in new_ips but not in existing_ips)
-        ips_to_add = [ip for ip in new_ips if ip not in existing_ips]
+        # 限制新IP数量不超过affect_num
+        if len(new_ips) > affect_num:
+            new_ips = new_ips[:affect_num]
         
-        # IPs to remove (in existing_ips but not in new_ips)
-        records_to_remove = [record for record in existing_records if record["value"] not in new_ips]
+        # 确保新IP列表长度正好为affect_num（如果可用IP不足，用None占位）
+        while len(new_ips) < affect_num:
+            new_ips.append(None)  # None表示这个位置不需要记录
         
-        # IPs to keep (in both)
-        records_to_keep = [record for record in existing_records if record["value"] in new_ips]
+        print(f"华为云批量更新 - 域名: {domain}.{sub_domain}, 线路: {line}, 目标数量: {affect_num}")
+        print(f"现有IP: {existing_ips}")
+        print(f"目标IP: {[ip for ip in new_ips if ip]}")
         
-        # Delete records that are no longer needed
+        # 确定需要删除和保留的记录
+        records_to_remove = []
+        records_to_keep = []
+        
+        # 按顺序处理现有记录
+        for i, record in enumerate(existing_records):
+            # 如果超出数量限制，或者IP不在目标列表中（且目标位置不是None），则删除
+            if i >= affect_num:
+                records_to_remove.append(record)
+                print(f"记录 {i+1} (IP: {record['value']}) - 超出数量限制，标记删除")
+            elif i < len(new_ips) and new_ips[i] and record["value"] == new_ips[i]:
+                # IP匹配且位置正确，保留
+                records_to_keep.append(record)
+                print(f"记录 {i+1} (IP: {record['value']}) - IP匹配，保留")
+            else:
+                # IP不匹配，需要删除（后续会在对应位置创建新记录）
+                records_to_remove.append(record)
+                print(f"记录 {i+1} (IP: {record['value']}) - IP不匹配，标记删除")
+        
+        # 确定需要添加的IP（新列表中且不在保留记录中）
+        kept_ips = [r["value"] for r in records_to_keep]
+        ips_to_add = []
+        
+        for i, ip in enumerate(new_ips):
+            if ip and ip not in kept_ips:
+                ips_to_add.append((i, ip))  # 记录位置和IP
+                print(f"需要添加IP: {ip} 到位置 {i+1}")
+        
+        # 删除不需要的记录
         for record in records_to_remove:
             ret = cloud.del_record(domain, record["recordId"])
             if config["dns_server"] != 1 or ret["code"] == 0:
@@ -222,21 +252,23 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
                       f"----RECORDID: {record['recordId']} ----VALUE: {record['value']} "
                       f"----MESSAGE: {ret.get('message', 'Unknown error')}")
         
-        # Create new records
-        for ip in ips_to_add:
+        # 创建新记录（按位置顺序）
+        for position, ip in ips_to_add:
             ret = cloud.create_record(domain, sub_domain, ip, record_type, line, ttl)
             if config["dns_server"] != 1 or ret["code"] == 0:
                 print(f"CREATE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                       f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
-                      f"----VALUE: {ip}")
+                      f"----VALUE: {ip} ----POSITION: {position+1}")
             else:
                 print(f"CREATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                       f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
                       f"----VALUE: {ip} ----MESSAGE: {ret.get('message', 'Unknown error')}")
         
-        # For Huawei Cloud, if you need to update existing records (change IP values),
-        # you would need to delete and recreate them as Huawei doesn't support direct update
-        # of record values for existing record IDs
+        # 统计最终结果
+        final_kept = len(records_to_keep)
+        final_added = len(ips_to_add)
+        final_removed = len(records_to_remove)
+        print(f"华为云批量更新完成 - 保留: {final_kept}, 新增: {final_added}, 删除: {final_removed}")
         
     except Exception as e:
         print(f"BATCH UPDATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
@@ -253,19 +285,14 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     lines = {"CM": "移动", "CU": "联通", "CT": "电信", "AB": "境外", "DEF": "默认"}
     line_chinese = lines[line]
     
-    # For Huawei Cloud DNS (dns_server == 3), use batch update
+    # For Huawei Cloud DNS (dns_server == 3), use batch update with proper cleanup
     if config["dns_server"] == 3:
         # Extract IPs from c_info
         new_ips = [ip_info["ip"] for ip_info in c_info]
         
-        # If we need to limit to affect_num
-        if len(new_ips) > config["affect_num"]:
-            new_ips = new_ips[:config["affect_num"]]
-        
-        # If we need to ensure exactly affect_num records (creating/deleting as needed)
-        if len(s_info) != config["affect_num"] or set([r["value"] for r in s_info]) != set(new_ips):
-            batch_update_huawei_dns(cloud, domain, sub_domain, recordType, line_chinese, 
-                                   s_info, new_ips, config["ttl"])
+        # 调用修复后的批量更新函数
+        batch_update_huawei_dns(cloud, domain, sub_domain, recordType, line_chinese, 
+                               s_info, new_ips, config["ttl"], config["affect_num"])
         return
 
     # Original logic for other DNS providers
@@ -312,6 +339,42 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     except Exception as e:
         print("CHANGE DNS ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----MESSAGE: " + str(traceback.print_exc()))
 
+def cleanup_extra_records(cloud, domain, sub_domain, record_type, valid_lines):
+    """
+    清理不属于指定线路的多余记录
+    """
+    try:
+        ret = cloud.get_record(domain, 100, sub_domain, record_type)
+        if config["dns_server"] == 1 and ret["code"] != 0:
+            return
+        
+        all_records = ret["data"]["records"]
+        cleaned_count = 0
+        
+        for record in all_records:
+            if record["type"] == record_type and record["line"] not in valid_lines:
+                # 删除不在指定线路中的记录
+                if config["dns_server"] == 3:  # 华为云
+                    del_ret = cloud.del_record(domain, record["id"])
+                    if del_ret.get("code") == 0:
+                        print(f"清理多余记录: {record['value']} (线路: {record['line']})")
+                        cleaned_count += 1
+                elif config["dns_server"] == 1:  # 腾讯云
+                    del_ret = cloud.del_record(domain, record["id"])
+                    if del_ret["code"] == 0:
+                        print(f"清理多余记录: {record['value']} (线路: {record['line']})")
+                        cleaned_count += 1
+                elif config["dns_server"] == 2:  # 阿里云
+                    del_ret = cloud.del_record(domain, record["RecordId"])
+                    if del_ret.get("code") == 0:
+                        print(f"清理多余记录: {record['value']} (线路: {record['line']})")
+                        cleaned_count += 1
+        
+        if cleaned_count > 0:
+            print(f"总共清理了 {cleaned_count} 条多余记录")
+            
+    except Exception as e:
+        print(f"清理多余记录时出错: {str(e)}")
 
 def main(cloud):
     global config
@@ -319,6 +382,7 @@ def main(cloud):
         recordType = "AAAA"
     else:
         recordType = "A"
+    
     if len(DOMAINS) > 0:
         try:
             cfips = get_optimization_ip()
@@ -333,11 +397,18 @@ def main(cloud):
             
             for domain, sub_domains in DOMAINS.items():
                 for sub_domain, lines in sub_domains.items():
+                    # 定义有效的线路列表
+                    valid_lines = ["移动", "联通", "电信", "境外", "默认"]
+                    
+                    # 清理不属于指定线路的多余记录
+                    cleanup_extra_records(cloud, domain, sub_domain, recordType, valid_lines)
+                    
                     temp_cf_cmips = cf_cmips.copy()
                     temp_cf_cuips = cf_cuips.copy()
                     temp_cf_ctips = cf_ctips.copy()
                     temp_cf_abips = cf_ctips.copy()
                     temp_cf_defips = cf_ctips.copy()
+                    
                     if config["dns_server"] == 1:
                         ret = cloud.get_record(domain, 20, sub_domain, "CNAME")
                         if ret["code"] == 0:
@@ -348,6 +419,7 @@ def main(cloud):
                                         print("DELETE DNS SUCCESS: ----Time: "  + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----DOMAIN: " + domain + "----SUBDOMAIN: " + sub_domain + "----RECORDLINE: "+record["line"] )
                                     else:
                                         print("DELETE DNS ERROR: ----Time: "  + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----DOMAIN: " + domain + "----SUBDOMAIN: " + sub_domain + "----RECORDLINE: "+record["line"] + "----MESSAGE: " + retMsg["message"] )
+                    
                     ret = cloud.get_record(domain, 100, sub_domain, recordType)
                     if config["dns_server"] != 1 or ret["code"] == 0:
                         if config["dns_server"] == 1 and "Free" in ret["data"]["domain"]["grade"] and config["affect_num"] > 2:
@@ -360,17 +432,19 @@ def main(cloud):
                         
                         for record in ret["data"]["records"]:
                             info = {}
-                            info["recordId"] = record["id"]
+                            info["recordId"] = record["id"] if config["dns_server"] != 2 else record["RecordId"]
                             info["value"] = record["value"]
-                            if record["line"] == "移动":
+                            line_name = record["line"] if config["dns_server"] != 2 else record["Line"]
+                            
+                            if line_name == "移动":
                                 cm_info.append(info)
-                            elif record["line"] == "联通":
+                            elif line_name == "联通":
                                 cu_info.append(info)
-                            elif record["line"] == "电信":
+                            elif line_name == "电信":
                                 ct_info.append(info)
-                            elif record["line"] == "境外":
+                            elif line_name == "境外":
                                 ab_info.append(info)
-                            elif record["line"] == "默认":
+                            elif line_name == "默认":
                                 def_info.append(info)
                         
                         for line in lines:
@@ -384,6 +458,7 @@ def main(cloud):
                                 changeDNS("AB", ab_info, temp_cf_abips, domain, sub_domain, cloud)
                             elif line == "DEF":
                                 changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
+                        
         except Exception as e:
             traceback.print_exc()  
             print("CHANGE DNS ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----MESSAGE: " + str(traceback.print_exc()))
