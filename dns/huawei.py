@@ -44,7 +44,10 @@ class HuaWeiApi():
         for record in data['recordsets']:
             if (sub_domain == '@' and domain + "." == record['name']) or (sub_domain + '.' + domain + "." == record['name']):
                 record['line'] = self.line_format(record['line'])
-                record['value'] = '1.1.1.1'
+                # 获取记录的values列表
+                if 'records' in record and record['records']:
+                    # 对于多条记录，我们只取第一条用于兼容性
+                    record['value'] = record['records'][0] if record['records'] else ''
                 records_temp.append(record)
         result['data'] = {'records': records_temp}
         return result
@@ -56,12 +59,16 @@ class HuaWeiApi():
             name = domain + "."
         else:
             name = sub_domain + '.' + domain + "."
+        
+        # value可以是单个IP或IP列表
+        records = value if isinstance(value, list) else [value]
+        
         request.body = CreateRecordSetWithLineReq(
             type = record_type,
             name = name,
             ttl = ttl,
             weight = 1,
-            records = [value],
+            records = records,
             line = self.line_format(line)
         )
         response = self.client.create_record_set_with_line(request)
@@ -69,6 +76,10 @@ class HuaWeiApi():
         return result
         
     def change_record(self, domain, record_id, sub_domain, value, record_type, line, ttl):
+        """
+        更新记录集，支持单个IP或IP列表
+        :param value: 可以是单个IP字符串，也可以是IP列表
+        """
         request = UpdateRecordSetRequest()
         request.zone_id = self.zone_id[domain + '.']
         request.recordset_id = record_id
@@ -76,11 +87,15 @@ class HuaWeiApi():
             name = domain + "."
         else:
             name = sub_domain + '.' + domain + "."
+        
+        # value可以是单个IP或IP列表
+        records = value if isinstance(value, list) else [value]
+        
         request.body = UpdateRecordSetReq(
             name = name,
             type = record_type,
             ttl = ttl,
-            records=[value]
+            records = records
         )
         response = self.client.update_record_set(request)
         result = json.loads(str(response))
