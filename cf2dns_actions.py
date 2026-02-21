@@ -194,6 +194,7 @@ def get_optimization_ip():
 def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existing_records, new_ips, ttl, affect_num):
     """
     Batch update DNS records for Huawei Cloud with proper cleanup
+    只处理指定线路的记录
     """
     try:
         # 获取现有IP列表
@@ -239,7 +240,7 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
                 ips_to_add.append((i, ip))  # 记录位置和IP
                 print(f"需要添加IP: {ip} 到位置 {i+1}")
         
-        # 删除不需要的记录
+        # 删除不需要的记录（只删除当前线路的记录）
         for record in records_to_remove:
             ret = cloud.del_record(domain, record["recordId"])
             if config["dns_server"] != 1 or ret["code"] == 0:
@@ -339,9 +340,10 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     except Exception as e:
         print("CHANGE DNS ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----MESSAGE: " + str(traceback.print_exc()))
 
-def cleanup_extra_records(cloud, domain, sub_domain, record_type, valid_lines):
+def cleanup_extra_records(cloud, domain, sub_domain, record_type, target_lines):
     """
-    清理不属于指定线路的多余记录
+    清理指定子域名下目标线路的多余记录
+    只删除指定线路的记录，不会影响其他线路
     """
     try:
         ret = cloud.get_record(domain, 100, sub_domain, record_type)
@@ -349,32 +351,32 @@ def cleanup_extra_records(cloud, domain, sub_domain, record_type, valid_lines):
             return
         
         all_records = ret["data"]["records"]
-        cleaned_count = 0
+        
+        # 统计各线路记录
+        line_records = {}
+        for line in target_lines:
+            line_records[line] = []
         
         for record in all_records:
-            if record["type"] == record_type and record["line"] not in valid_lines:
-                # 删除不在指定线路中的记录
-                if config["dns_server"] == 3:  # 华为云
-                    del_ret = cloud.del_record(domain, record["id"])
-                    if del_ret.get("code") == 0:
-                        print(f"清理多余记录: {record['value']} (线路: {record['line']})")
-                        cleaned_count += 1
-                elif config["dns_server"] == 1:  # 腾讯云
-                    del_ret = cloud.del_record(domain, record["id"])
-                    if del_ret["code"] == 0:
-                        print(f"清理多余记录: {record['value']} (线路: {record['line']})")
-                        cleaned_count += 1
-                elif config["dns_server"] == 2:  # 阿里云
-                    del_ret = cloud.del_record(domain, record["RecordId"])
-                    if del_ret.get("code") == 0:
-                        print(f"清理多余记录: {record['value']} (线路: {record['line']})")
-                        cleaned_count += 1
+            # 获取记录线路名称（根据不同DNS服务商适配）
+            line_name = ""
+            if config["dns_server"] == 1:  # 腾讯云
+                line_name = record.get("line", "")
+            elif config["dns_server"] == 2:  # 阿里云
+                line_name = record.get("Line", "")
+            elif config["dns_server"] == 3:  # 华为云
+                line_name = record.get("line", "")
+            
+            # 只处理目标线路的记录
+            if line_name in target_lines:
+                line_records[line_name].append(record)
         
-        if cleaned_count > 0:
-            print(f"总共清理了 {cleaned_count} 条多余记录")
+        print(f"子域名 {sub_domain} 下 {record_type} 记录统计:")
+        for line, records in line_records.items():
+            print(f"  {line}: {len(records)} 条")
             
     except Exception as e:
-        print(f"清理多余记录时出错: {str(e)}")
+        print(f"检查记录时出错: {str(e)}")
 
 def main(cloud):
     global config
@@ -382,6 +384,9 @@ def main(cloud):
         recordType = "AAAA"
     else:
         recordType = "A"
+    
+    # 定义只处理的三网线路
+    three_net_lines = ["移动", "联通", "电信"]
     
     if len(DOMAINS) > 0:
         try:
@@ -397,67 +402,64 @@ def main(cloud):
             
             for domain, sub_domains in DOMAINS.items():
                 for sub_domain, lines in sub_domains.items():
-                    # 定义有效的线路列表
-                    valid_lines = ["移动", "联通", "电信", "境外", "默认"]
+                    # 只处理三网线路（过滤掉AB和DEF）
+                    filtered_lines = [line for line in lines if line in ["CM", "CU", "CT"]]
                     
-                    # 清理不属于指定线路的多余记录
-                    cleanup_extra_records(cloud, domain, sub_domain, recordType, valid_lines)
+                    if not filtered_lines:
+                        print(f"子域名 {sub_domain} 没有指定三网线路，跳过")
+                        continue
+                    
+                    # 检查记录状态，但只统计三网线路
+                    cleanup_extra_records(cloud, domain, sub_domain, recordType, three_net_lines)
                     
                     temp_cf_cmips = cf_cmips.copy()
                     temp_cf_cuips = cf_cuips.copy()
                     temp_cf_ctips = cf_ctips.copy()
-                    temp_cf_abips = cf_ctips.copy()
-                    temp_cf_defips = cf_ctips.copy()
                     
-                    if config["dns_server"] == 1:
-                        ret = cloud.get_record(domain, 20, sub_domain, "CNAME")
-                        if ret["code"] == 0:
-                            for record in ret["data"]["records"]:
-                                if record["line"] == "移动" or record["line"] == "联通" or record["line"] == "电信":
-                                    retMsg = cloud.del_record(domain, record["id"])
-                                    if(retMsg["code"] == 0):
-                                        print("DELETE DNS SUCCESS: ----Time: "  + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----DOMAIN: " + domain + "----SUBDOMAIN: " + sub_domain + "----RECORDLINE: "+record["line"] )
-                                    else:
-                                        print("DELETE DNS ERROR: ----Time: "  + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----DOMAIN: " + domain + "----SUBDOMAIN: " + sub_domain + "----RECORDLINE: "+record["line"] + "----MESSAGE: " + retMsg["message"] )
-                    
+                    # 获取当前A/AAAA记录
                     ret = cloud.get_record(domain, 100, sub_domain, recordType)
                     if config["dns_server"] != 1 or ret["code"] == 0:
                         if config["dns_server"] == 1 and "Free" in ret["data"]["domain"]["grade"] and config["affect_num"] > 2:
                             config["affect_num"] = 2
+                        
+                        # 只初始化三网线路的记录列表
                         cm_info = []
                         cu_info = []
                         ct_info = []
-                        ab_info = []
-                        def_info = []
                         
                         for record in ret["data"]["records"]:
                             info = {}
                             info["recordId"] = record["id"] if config["dns_server"] != 2 else record["RecordId"]
                             info["value"] = record["value"]
-                            line_name = record["line"] if config["dns_server"] != 2 else record["Line"]
                             
+                            # 获取线路名称
+                            line_name = ""
+                            if config["dns_server"] == 1:  # 腾讯云
+                                line_name = record["line"]
+                            elif config["dns_server"] == 2:  # 阿里云
+                                line_name = record["Line"]
+                            elif config["dns_server"] == 3:  # 华为云
+                                line_name = record["line"]
+                            
+                            # 只处理三网线路的记录
                             if line_name == "移动":
                                 cm_info.append(info)
                             elif line_name == "联通":
                                 cu_info.append(info)
                             elif line_name == "电信":
                                 ct_info.append(info)
-                            elif line_name == "境外":
-                                ab_info.append(info)
-                            elif line_name == "默认":
-                                def_info.append(info)
+                            # 其他线路（境外、默认）不处理，保留原样
                         
-                        for line in lines:
+                        print(f"当前三网记录数量 - 移动: {len(cm_info)}, 联通: {len(cu_info)}, 电信: {len(ct_info)}")
+                        
+                        # 只更新配置中指定的三网线路
+                        for line in filtered_lines:
                             if line == "CM":
                                 changeDNS("CM", cm_info, temp_cf_cmips, domain, sub_domain, cloud)
                             elif line == "CU":
                                 changeDNS("CU", cu_info, temp_cf_cuips, domain, sub_domain, cloud)
                             elif line == "CT":
                                 changeDNS("CT", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
-                            elif line == "AB":
-                                changeDNS("AB", ab_info, temp_cf_abips, domain, sub_domain, cloud)
-                            elif line == "DEF":
-                                changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
                         
         except Exception as e:
             traceback.print_exc()  
