@@ -26,6 +26,75 @@ NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
 # 添加VPS789 API地址
 VPS789_API_URL = "https://vps789.com/public/sum/cfIpApi"
 
+def safe_float_conversion(value, default=0.0):
+    """
+    安全地将值转换为浮点数
+    """
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def get_sort_key(ip_info, isp=None):
+    """
+    获取IP信息的排序键值，用于lambda表达式
+    根据不同的运营商使用对应的评分
+    """
+    try:
+        # 优先使用speed字段
+        speed = safe_float_conversion(ip_info.get("speed"))
+        if speed > 0:
+            return speed
+        
+        # 其次使用avgScore
+        avg_score = safe_float_conversion(ip_info.get("avgScore"))
+        if avg_score > 0:
+            return avg_score
+        
+        # 然后使用downloadSpeed
+        download_speed = safe_float_conversion(ip_info.get("downloadSpeed"))
+        if download_speed > 0:
+            return download_speed
+        
+        # 如果有指定运营商，使用对应的运营商评分
+        if isp == "CM":
+            yd_score = safe_float_conversion(ip_info.get("ydScore"))
+            if yd_score > 0:
+                return yd_score
+        elif isp == "CU":
+            lt_score = safe_float_conversion(ip_info.get("ltScore"))
+            if lt_score > 0:
+                return lt_score
+        elif isp == "CT":
+            dx_score = safe_float_conversion(ip_info.get("dxScore"))
+            if dx_score > 0:
+                return dx_score
+        
+        # 使用延迟（越低越好，所以取负值）
+        if isp == "CM":
+            latency = safe_float_conversion(ip_info.get("ydLatencyAvg"))
+            if latency > 0:
+                return -latency  # 延迟越低越好
+        elif isp == "CU":
+            latency = safe_float_conversion(ip_info.get("ltLatencyAvg"))
+            if latency > 0:
+                return -latency
+        elif isp == "CT":
+            latency = safe_float_conversion(ip_info.get("dxLatencyAvg"))
+            if latency > 0:
+                return -latency
+        
+        # 最后使用通用延迟
+        latency = safe_float_conversion(ip_info.get("latency"))
+        if latency > 0:
+            return -latency
+        
+        return 0.0
+    except Exception:
+        return 0.0
+
 def get_optimization_ip():
     """
     从多个API获取IP信息并合并
@@ -34,7 +103,7 @@ def get_optimization_ip():
     VPS789 API：https://vps789.com/public/sum/cfIpApi
     """
     try:
-        # 用于存储合并后的IP信息
+        # 存储所有版本的IP信息
         merged_ips = {
             "v4": {"CM": [], "CU": [], "CT": []},
             "v6": {"CM": [], "CU": [], "CT": []}
@@ -42,29 +111,27 @@ def get_optimization_ip():
         
         headers = {'Content-Type': 'application/json'}
         
-        # 1. 从原API获取IP信息
+        # 1. 从原API获取IP信息（获取v4和v6两种类型）
         try:
-            data = {"key": config["key"], "type": iptype}
-            provider = [item for item in provider_data if item['id'] == config["data_server"]][0]
-            response = requests.post(provider['get_ip_url'], json=data, headers=headers, timeout=10)
-            if response.status_code == 200:
-                old_data = response.json()
-                if old_data and old_data.get("code") == 200:
-                    # 合并原API的IP信息
-                    for isp in ["CM", "CU", "CT"]:
-                        if isp in old_data["info"]:
-                            for ip_info in old_data["info"][isp]:
-                                # 确保ip_info是字典格式
-                                if isinstance(ip_info, str):
-                                    ip_info = {"ip": ip_info}
-                                elif isinstance(ip_info, dict) and "ip" not in ip_info:
-                                    # 如果字典中没有ip字段，尝试其他字段
-                                    if "value" in ip_info:
-                                        ip_info["ip"] = ip_info["value"]
-                                merged_ips[iptype][isp].append(ip_info)
-                    print(f"从原API获取到 {sum(len(merged_ips[iptype][isp]) for isp in ['CM','CU','CT'])} 个IP")
-            else:
-                print(f"原API请求失败，状态码: {response.status_code}")
+            for current_type in ["v4", "v6"]:
+                data = {"key": config["key"], "type": current_type}
+                provider = [item for item in provider_data if item['id'] == config["data_server"]][0]
+                response = requests.post(provider['get_ip_url'], json=data, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    old_data = response.json()
+                    if old_data and old_data.get("code") == 200:
+                        for isp in ["CM", "CU", "CT"]:
+                            if isp in old_data["info"]:
+                                for ip_info in old_data["info"][isp]:
+                                    # 确保ip_info是字典格式
+                                    if isinstance(ip_info, str):
+                                        ip_info = {"ip": ip_info}
+                                    elif isinstance(ip_info, dict) and "ip" not in ip_info:
+                                        # 如果字典中没有ip字段，尝试其他字段
+                                        if "value" in ip_info:
+                                            ip_info["ip"] = ip_info["value"]
+                                    merged_ips[current_type][isp].append(ip_info)
+                print(f"从原API获取到 {current_type} IP: {sum(len(merged_ips[current_type][isp]) for isp in ['CM','CU','CT'])} 个")
         except Exception as e:
             print(f"从原API获取IP失败: {str(e)}")
         
@@ -74,9 +141,8 @@ def get_optimization_ip():
             if response.status_code == 200:
                 new_data = response.json()
                 if new_data and new_data.get("success") and "data" in new_data:
-                    # 合并新API的IP信息
                     for ip_version in ["v4", "v6"]:
-                        if ip_version in new_data["data"] and ip_version == iptype:
+                        if ip_version in new_data["data"]:
                             for isp in ["CM", "CU", "CT"]:
                                 if isp in new_data["data"][ip_version]:
                                     for ip_info in new_data["data"][ip_version][isp]:
@@ -90,9 +156,7 @@ def get_optimization_ip():
                                             "uptime": ip_info.get("uptime", "")
                                         }
                                         merged_ips[ip_version][isp].append(converted_info)
-                    print(f"从4ce.cn API获取到 {sum(len(merged_ips[iptype][isp]) for isp in ['CM','CU','CT'])} 个IP")
-            else:
-                print(f"4ce.cn API请求失败，状态码: {response.status_code}")
+                    print(f"从4ce.cn API获取到IP: v4: {sum(len(merged_ips['v4'][isp]) for isp in ['CM','CU','CT'])}, v6: {sum(len(merged_ips['v6'][isp]) for isp in ['CM','CU','CT'])}")
         except Exception as e:
             print(f"从4ce.cn API获取IP失败: {str(e)}")
         
@@ -102,29 +166,51 @@ def get_optimization_ip():
             if response.status_code == 200:
                 vps789_data = response.json()
                 if vps789_data and vps789_data.get("code") == 0 and "data" in vps789_data:
-                    # 处理VPS789 API的数据
-                    for isp in ["CM", "CU", "CT"]:
-                        if isp in vps789_data["data"]:
-                            for ip_info in vps789_data["data"][isp]:
-                                # 转换VPS789的数据格式
-                                converted_info = {
-                                    "ip": ip_info["ip"],
-                                    "ydLatencyAvg": ip_info.get("ydLatencyAvg", 0),
-                                    "ydPkgLostRateAvg": ip_info.get("ydPkgLostRateAvg", 0),
-                                    "ltLatencyAvg": ip_info.get("ltLatencyAvg", 0),
-                                    "ltPkgLostRateAvg": ip_info.get("ltPkgLostRateAvg", 0),
-                                    "dxLatencyAvg": ip_info.get("dxLatencyAvg", 0),
-                                    "dxPkgLostRateAvg": ip_info.get("dxPkgLostRateAvg", 0),
-                                    "downloadSpeed": ip_info.get("downloadSpeed", 0),
-                                    "avgScore": ip_info.get("avgScore", 0),
-                                    "ydScore": ip_info.get("ydScore", 0),
-                                    "dxScore": ip_info.get("dxScore", 0),
-                                    "ltScore": ip_info.get("ltScore", 0),
-                                    "createdTime": ip_info.get("createdTime", "")
-                                }
-                                merged_ips[iptype][isp].append(converted_info)
+                    # 处理V4数据
+                    if "v4" in vps789_data["data"]:
+                        for isp in ["CM", "CU", "CT"]:
+                            if isp in vps789_data["data"]["v4"]:
+                                for ip_info in vps789_data["data"]["v4"][isp]:
+                                    converted_info = {
+                                        "ip": ip_info["ip"],
+                                        "ydLatencyAvg": ip_info.get("ydLatencyAvg", 0),
+                                        "ydPkgLostRateAvg": ip_info.get("ydPkgLostRateAvg", 0),
+                                        "ltLatencyAvg": ip_info.get("ltLatencyAvg", 0),
+                                        "ltPkgLostRateAvg": ip_info.get("ltPkgLostRateAvg", 0),
+                                        "dxLatencyAvg": ip_info.get("dxLatencyAvg", 0),
+                                        "dxPkgLostRateAvg": ip_info.get("dxPkgLostRateAvg", 0),
+                                        "downloadSpeed": ip_info.get("downloadSpeed", 0),
+                                        "avgScore": ip_info.get("avgScore", 0),
+                                        "ydScore": ip_info.get("ydScore", 0),
+                                        "dxScore": ip_info.get("dxScore", 0),
+                                        "ltScore": ip_info.get("ltScore", 0),
+                                        "createdTime": ip_info.get("createdTime", "")
+                                    }
+                                    merged_ips["v4"][isp].append(converted_info)
                     
-                    # 如果有AllAvg数据，可以将其分配到各个运营商或作为备用
+                    # 处理V6数据
+                    if "v6" in vps789_data["data"]:
+                        for isp in ["CM", "CU", "CT"]:
+                            if isp in vps789_data["data"]["v6"]:
+                                for ip_info in vps789_data["data"]["v6"][isp]:
+                                    converted_info = {
+                                        "ip": ip_info["ip"],
+                                        "ydLatencyAvg": ip_info.get("ydLatencyAvg", 0),
+                                        "ydPkgLostRateAvg": ip_info.get("ydPkgLostRateAvg", 0),
+                                        "ltLatencyAvg": ip_info.get("ltLatencyAvg", 0),
+                                        "ltPkgLostRateAvg": ip_info.get("ltPkgLostRateAvg", 0),
+                                        "dxLatencyAvg": ip_info.get("dxLatencyAvg", 0),
+                                        "dxPkgLostRateAvg": ip_info.get("dxPkgLostRateAvg", 0),
+                                        "downloadSpeed": ip_info.get("downloadSpeed", 0),
+                                        "avgScore": ip_info.get("avgScore", 0),
+                                        "ydScore": ip_info.get("ydScore", 0),
+                                        "dxScore": ip_info.get("dxScore", 0),
+                                        "ltScore": ip_info.get("ltScore", 0),
+                                        "createdTime": ip_info.get("createdTime", "")
+                                    }
+                                    merged_ips["v6"][isp].append(converted_info)
+                    
+                    # 处理AllAvg数据（如果有）
                     if "AllAvg" in vps789_data["data"]:
                         for ip_info in vps789_data["data"]["AllAvg"]:
                             converted_info = {
@@ -142,39 +228,54 @@ def get_optimization_ip():
                                 "ltScore": ip_info.get("ltScore", 0),
                                 "createdTime": ip_info.get("createdTime", "")
                             }
-                            # 将AllAvg的IP添加到所有运营商
+                            # 将AllAvg的IP添加到所有运营商（v4和v6都需要判断）
+                            ip_type = "v6" if ":" in ip_info["ip"] else "v4"
                             for isp in ["CM", "CU", "CT"]:
-                                merged_ips[iptype][isp].append(converted_info)
+                                merged_ips[ip_type][isp].append(converted_info)
                     
-                    print(f"从VPS789 API获取到 {sum(len(merged_ips[iptype][isp]) for isp in ['CM','CU','CT'])} 个IP")
-            else:
-                print(f"VPS789 API请求失败，状态码: {response.status_code}")
+                    print(f"从VPS789 API获取到IP: v4: {sum(len(merged_ips['v4'][isp]) for isp in ['CM','CU','CT'])}, v6: {sum(len(merged_ips['v6'][isp]) for isp in ['CM','CU','CT'])}")
         except Exception as e:
             print(f"从VPS789 API获取IP失败: {str(e)}")
         
-        # 4. 去重（基于IP地址）
-        for isp in ["CM", "CU", "CT"]:
-            seen_ips = set()
-            unique_ips = []
-            for ip_info in merged_ips[iptype][isp]:
-                ip = ip_info.get("ip", "")
-                if ip and ip not in seen_ips:
-                    seen_ips.add(ip)
-                    unique_ips.append(ip_info)
-            merged_ips[iptype][isp] = unique_ips
+        # 4. 为每个版本和运营商去重（基于IP地址，并合并数据）
+        for version in ["v4", "v6"]:
+            for isp in ["CM", "CU", "CT"]:
+                seen_ips = {}
+                unique_ips = []
+                for ip_info in merged_ips[version][isp]:
+                    ip = ip_info.get("ip", "")
+                    if ip:
+                        if ip not in seen_ips:
+                            seen_ips[ip] = ip_info
+                            unique_ips.append(ip_info)
+                        else:
+                            # 合并数据，保留非空值
+                            existing = seen_ips[ip]
+                            for key, value in ip_info.items():
+                                if key != "ip" and value and (key not in existing or not existing[key]):
+                                    existing[key] = value
+                merged_ips[version][isp] = unique_ips
         
-        # 5. 按速度或分数排序（优先使用speed，如果没有则使用avgScore）
-        for isp in ["CM", "CU", "CT"]:
-            merged_ips[iptype][isp].sort(key=lambda x: (
-                x.get("speed", 0) or  # 如果有speed字段
-                x.get("avgScore", 0) or  # 如果有avgScore字段
-                0
-            ), reverse=True)
+        # 5. 按速度或分数排序（使用严谨的排序函数）
+        for version in ["v4", "v6"]:
+            for isp in ["CM", "CU", "CT"]:
+                # 使用更严谨的排序，降序排列（值越大越好）
+                merged_ips[version][isp].sort(
+                    key=lambda x, isp=isp: get_sort_key(x, isp),
+                    reverse=True
+                )
         
+        # 6. 为当前iptype统计
         total_ips = sum(len(merged_ips[iptype][isp]) for isp in ["CM", "CU", "CT"])
-        print(f"合并后总共获取到 {total_ips} 个{iptype} IP")
+        print(f"当前类型 {iptype} 总共获取到 {total_ips} 个IP")
+        if total_ips > 0:
+            for isp in ["CM", "CU", "CT"]:
+                if merged_ips[iptype][isp]:
+                    best_ip = merged_ips[iptype][isp][0]['ip']
+                    best_score = get_sort_key(merged_ips[iptype][isp][0], isp)
+                    print(f"  {isp}: {len(merged_ips[iptype][isp])} 个 (最佳IP: {best_ip}, 评分: {best_score:.2f})")
         
-        # 6. 构建返回数据，保持与原API相同的格式
+        # 7. 构建返回数据，保持与原API相同的格式
         result = {
             "code": 200,
             "info": {
@@ -200,42 +301,49 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
         # 获取现有IP列表
         existing_ips = [record["value"] for record in existing_records]
         
-        # 限制新IP数量不超过affect_num
+        # 限制新IP数量不超过affect_num，并选择性能最好的
         if len(new_ips) > affect_num:
-            new_ips = new_ips[:affect_num]
+            # 使用更严谨的排序选择最好的affect_num个IP
+            new_ips = sorted(
+                new_ips, 
+                key=lambda x: get_sort_key(x, line_to_isp(line)),
+                reverse=True
+            )[:affect_num]
+        
+        new_ip_values = [ip_info["ip"] for ip_info in new_ips]
         
         # 如果没有现有记录，需要创建新记录
         if not existing_records:
-            if new_ips:
+            if new_ip_values:
                 # 直接创建包含所有IP的记录集
-                ret = cloud.create_record(domain, sub_domain, new_ips, record_type, line, ttl)
+                ret = cloud.create_record(domain, sub_domain, new_ip_values, record_type, line, ttl)
                 if ret and (config["dns_server"] != 1 or ret.get("code") == 0):
                     print(f"CREATE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                           f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
-                          f"----VALUES: {new_ips}")
+                          f"----VALUES: {new_ip_values}")
                 else:
                     print(f"CREATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                           f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
-                          f"----VALUES: {new_ips} ----MESSAGE: {ret.get('message', 'Unknown error')}")
+                          f"----VALUES: {new_ip_values} ----MESSAGE: {ret.get('message', 'Unknown error')}")
             return
         
         # 有现有记录，使用第一条记录的ID进行更新（华为云一个线路只有一个记录集，包含多个IP）
         primary_record = existing_records[0]
         
         # 如果新旧IP列表完全相同，不需要更新
-        if set(existing_ips) == set(new_ips):
+        if set(existing_ips) == set(new_ip_values):
             print(f"DNS RECORDS UNCHANGED: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                   f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
-                  f"----VALUES: {new_ips}")
+                  f"----VALUES: {new_ip_values}")
             return
         
         # 执行批量更新
-        ret = cloud.change_record(domain, primary_record["recordId"], sub_domain, new_ips, record_type, line, ttl)
+        ret = cloud.change_record(domain, primary_record["recordId"], sub_domain, new_ip_values, record_type, line, ttl)
         
         if ret and (config["dns_server"] != 1 or ret.get("code") == 0):
             print(f"BATCH UPDATE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                   f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
-                  f"----OLD VALUES: {existing_ips} ----NEW VALUES: {new_ips}")
+                  f"----OLD VALUES: {existing_ips} ----NEW VALUES: {new_ip_values}")
             
             # 如果有多余的现有记录（理论上不应该有，但以防万一）
             if len(existing_records) > 1:
@@ -247,13 +355,24 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
         else:
             print(f"BATCH UPDATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
                   f"----DOMAIN: {domain} ----SUBDOMAIN: {sub_domain} ----RECORDLINE: {line} "
-                  f"----OLD VALUES: {existing_ips} ----NEW VALUES: {new_ips} "
+                  f"----OLD VALUES: {existing_ips} ----NEW VALUES: {new_ip_values} "
                   f"----MESSAGE: {ret.get('message', 'Unknown error')}")
         
     except Exception as e:
         print(f"BATCH UPDATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} "
               f"----MESSAGE: {str(e)}")
         traceback.print_exc()
+
+def line_to_isp(line_chinese):
+    """
+    将中文线路名称转换为ISP代码
+    """
+    line_map = {
+        "移动": "CM",
+        "联通": "CU", 
+        "电信": "CT"
+    }
+    return line_map.get(line_chinese, None)
 
 def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     global config
@@ -268,7 +387,7 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     # For Huawei Cloud DNS (dns_server == 3), use batch update with proper cleanup
     if config["dns_server"] == 3:
         # Extract IPs from c_info
-        new_ips = [ip_info["ip"] for ip_info in c_info]
+        new_ips = [ip_info for ip_info in c_info]
         
         # 调用修复后的批量更新函数
         batch_update_huawei_dns(cloud, domain, sub_domain, recordType, line_chinese, 
@@ -282,7 +401,12 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
             for info in s_info:
                 if len(c_info) == 0:
                     break
-                cf_ip = c_info.pop(random.randint(0, len(c_info)-1))["ip"]
+                # 选择IP时也考虑性能
+                c_info_sorted = sorted(c_info, key=lambda x: get_sort_key(x, line), reverse=True)
+                cf_ip_info = c_info_sorted[0]
+                c_info.remove(cf_ip_info)
+                cf_ip = cf_ip_info["ip"]
+                
                 if cf_ip in str(s_info):
                     continue
                 ret = cloud.change_record(domain, info["recordId"], sub_domain, cf_ip, recordType, line_chinese, config["ttl"])
@@ -294,7 +418,12 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
             for i in range(create_num):
                 if len(c_info) == 0:
                     break
-                cf_ip = c_info.pop(random.randint(0, len(c_info)-1))["ip"]
+                # 选择IP时也考虑性能
+                c_info_sorted = sorted(c_info, key=lambda x: get_sort_key(x, line), reverse=True)
+                cf_ip_info = c_info_sorted[0]
+                c_info.remove(cf_ip_info)
+                cf_ip = cf_ip_info["ip"]
+                
                 if cf_ip in str(s_info):
                     continue
                 ret = cloud.create_record(domain, sub_domain, cf_ip, recordType, line_chinese, config["ttl"])
@@ -306,7 +435,12 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
             for info in s_info:
                 if create_num == 0 or len(c_info) == 0:
                     break
-                cf_ip = c_info.pop(random.randint(0, len(c_info)-1))["ip"]
+                # 选择IP时也考虑性能
+                c_info_sorted = sorted(c_info, key=lambda x: get_sort_key(x, line), reverse=True)
+                cf_ip_info = c_info_sorted[0]
+                c_info.remove(cf_ip_info)
+                cf_ip = cf_ip_info["ip"]
+                
                 if cf_ip in str(s_info):
                     create_num += 1
                     continue
