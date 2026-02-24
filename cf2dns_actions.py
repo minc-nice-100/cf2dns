@@ -3,6 +3,7 @@
 # Mail: tongdongdong@outlook.com
 
 import sys, os, json, requests, time, base64, shutil, random, traceback
+import ipaddress
 
 # 生成随机时间，范围在10到150之间
 #random_time = random.uniform(10, 100)
@@ -25,6 +26,109 @@ provider_data = json.loads(os.environ["PROVIDER"])
 NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
 # 添加VPS789 API地址
 VPS789_API_URL = "https://vps789.com/public/sum/cfIpApi"
+
+# ==================== IP黑名单配置（手动编码）====================
+# 支持CIDR格式，可以添加IPv4和IPv6网段
+# 格式：["192.168.1.0/24", "10.0.0.0/8", "2001:db8::/32", "1.1.1.1/32"]
+IP_BLACKLIST_CIDR = [
+    # 在这里添加需要屏蔽的IP网段
+    # 示例：
+    "192.168.1.0/24",  # 屏蔽192.168.1.x整个网段
+    "10.0.0.0/8",      # 屏蔽10.x.x.x整个A类私有地址
+    "172.16.0.0/12",   # 屏蔽172.16.x.x - 172.31.x.x私有地址
+    "127.0.0.0/8",     # 屏蔽本地回环地址
+    "0.0.0.0/8",       # 屏蔽无效地址
+    "100.64.0.0/10",   # 屏蔽运营商级NAT地址
+    "169.254.0.0/16",  # 屏蔽链路本地地址
+    "224.0.0.0/4",     # 屏蔽组播地址
+    "240.0.0.0/4",     # 屏蔽保留地址
+    "255.255.255.255/32", # 屏蔽广播地址
+    "172.64.159.79/32"
+    
+    IPv6示例：
+    "::1/128",         # 屏蔽IPv6回环地址
+    "fc00::/7",        # 屏蔽唯一本地地址
+    "fe80::/10",       # 屏蔽链路本地地址
+    "ff00::/8",        # 屏蔽组播地址
+]
+
+# 编译IP黑名单网络对象，提高匹配效率
+IP_BLACKLIST_NETWORKS = []
+
+def compile_blacklist():
+    """
+    编译IP黑名单CIDR列表为ipaddress网络对象
+    """
+    global IP_BLACKLIST_NETWORKS
+    IP_BLACKLIST_NETWORKS = []
+    
+    for cidr in IP_BLACKLIST_CIDR:
+        try:
+            # 尝试解析为IPv4或IPv6网络
+            network = ipaddress.ip_network(cidr, strict=False)
+            IP_BLACKLIST_NETWORKS.append(network)
+            print(f"添加黑名单网段: {cidr} ({'IPv4' if network.version == 4 else 'IPv6'})")
+        except ValueError as e:
+            print(f"警告: CIDR格式错误 '{cidr}': {str(e)}")
+        except Exception as e:
+            print(f"警告: 解析CIDR '{cidr}' 时发生未知错误: {str(e)}")
+    
+    print(f"IP黑名单初始化完成，共加载 {len(IP_BLACKLIST_NETWORKS)} 个网段")
+
+def is_ip_blacklisted(ip):
+    """
+    检查IP是否在黑名单中
+    支持IPv4和IPv6
+    """
+    try:
+        # 尝试解析IP地址
+        ip_addr = ipaddress.ip_address(ip)
+        
+        # 检查是否匹配任何黑名单网段
+        for network in IP_BLACKLIST_NETWORKS:
+            if ip_addr in network:
+                print(f"IP {ip} 匹配黑名单网段 {network}")
+                return True
+        
+        return False
+    except ValueError as e:
+        print(f"警告: IP地址格式错误 '{ip}': {str(e)}")
+        return False
+    except Exception as e:
+        print(f"警告: 检查IP黑名单时发生错误 '{ip}': {str(e)}")
+        return False
+
+def filter_blacklist_ips(ip_list):
+    """
+    过滤掉黑名单中的IP
+    返回过滤后的IP列表和被过滤的IP列表
+    """
+    filtered_ips = []
+    blocked_ips = []
+    
+    for ip_info in ip_list:
+        # 处理不同格式的IP信息
+        if isinstance(ip_info, dict):
+            ip = ip_info.get("ip", "")
+        elif isinstance(ip_info, str):
+            ip = ip_info
+            ip_info = {"ip": ip}  # 转换为统一格式
+        else:
+            continue
+        
+        if ip and not is_ip_blacklisted(ip):
+            filtered_ips.append(ip_info)
+        elif ip:
+            blocked_ips.append(ip)
+    
+    if blocked_ips:
+        print(f"过滤掉 {len(blocked_ips)} 个黑名单IP: {blocked_ips[:5]}{'...' if len(blocked_ips) > 5 else ''}")
+    
+    return filtered_ips, blocked_ips
+
+# 编译黑名单
+compile_blacklist()
+# ==================== IP黑名单配置结束 ====================
 
 def safe_float_conversion(value, default=0.0):
     """
@@ -130,7 +234,10 @@ def get_optimization_ip():
                                         # 如果字典中没有ip字段，尝试其他字段
                                         if "value" in ip_info:
                                             ip_info["ip"] = ip_info["value"]
-                                    merged_ips[current_type][isp].append(ip_info)
+                                    
+                                    # 过滤黑名单IP
+                                    if not is_ip_blacklisted(ip_info.get("ip", "")):
+                                        merged_ips[current_type][isp].append(ip_info)
                 print(f"从原API获取到 {current_type} IP: {sum(len(merged_ips[current_type][isp]) for isp in ['CM','CU','CT'])} 个")
         except Exception as e:
             print(f"从原API获取IP失败: {str(e)}")
@@ -155,7 +262,9 @@ def get_optimization_ip():
                                             "speed": ip_info.get("speed", 0),
                                             "uptime": ip_info.get("uptime", "")
                                         }
-                                        merged_ips[ip_version][isp].append(converted_info)
+                                        # 过滤黑名单IP
+                                        if not is_ip_blacklisted(ip_info["ip"]):
+                                            merged_ips[ip_version][isp].append(converted_info)
                     print(f"从4ce.cn API获取到IP: v4: {sum(len(merged_ips['v4'][isp]) for isp in ['CM','CU','CT'])}, v6: {sum(len(merged_ips['v6'][isp]) for isp in ['CM','CU','CT'])}")
         except Exception as e:
             print(f"从4ce.cn API获取IP失败: {str(e)}")
@@ -186,7 +295,9 @@ def get_optimization_ip():
                                         "ltScore": ip_info.get("ltScore", 0),
                                         "createdTime": ip_info.get("createdTime", "")
                                     }
-                                    merged_ips["v4"][isp].append(converted_info)
+                                    # 过滤黑名单IP
+                                    if not is_ip_blacklisted(ip_info["ip"]):
+                                        merged_ips["v4"][isp].append(converted_info)
                     
                     # 处理V6数据
                     if "v6" in vps789_data["data"]:
@@ -208,7 +319,9 @@ def get_optimization_ip():
                                         "ltScore": ip_info.get("ltScore", 0),
                                         "createdTime": ip_info.get("createdTime", "")
                                     }
-                                    merged_ips["v6"][isp].append(converted_info)
+                                    # 过滤黑名单IP
+                                    if not is_ip_blacklisted(ip_info["ip"]):
+                                        merged_ips["v6"][isp].append(converted_info)
                     
                     # 处理AllAvg数据（如果有）
                     if "AllAvg" in vps789_data["data"]:
@@ -228,10 +341,12 @@ def get_optimization_ip():
                                 "ltScore": ip_info.get("ltScore", 0),
                                 "createdTime": ip_info.get("createdTime", "")
                             }
-                            # 将AllAvg的IP添加到所有运营商（v4和v6都需要判断）
-                            ip_type = "v6" if ":" in ip_info["ip"] else "v4"
-                            for isp in ["CM", "CU", "CT"]:
-                                merged_ips[ip_type][isp].append(converted_info)
+                            # 过滤黑名单IP
+                            if not is_ip_blacklisted(ip_info["ip"]):
+                                # 将AllAvg的IP添加到所有运营商（v4和v6都需要判断）
+                                ip_type = "v6" if ":" in ip_info["ip"] else "v4"
+                                for isp in ["CM", "CU", "CT"]:
+                                    merged_ips[ip_type][isp].append(converted_info)
                     
                     print(f"从VPS789 API获取到IP: v4: {sum(len(merged_ips['v4'][isp]) for isp in ['CM','CU','CT'])}, v6: {sum(len(merged_ips['v6'][isp]) for isp in ['CM','CU','CT'])}")
         except Exception as e:
@@ -267,7 +382,7 @@ def get_optimization_ip():
         
         # 6. 为当前iptype统计
         total_ips = sum(len(merged_ips[iptype][isp]) for isp in ["CM", "CU", "CT"])
-        print(f"当前类型 {iptype} 总共获取到 {total_ips} 个IP")
+        print(f"当前类型 {iptype} 总共获取到 {total_ips} 个IP（已过滤黑名单）")
         if total_ips > 0:
             for isp in ["CM", "CU", "CT"]:
                 if merged_ips[iptype][isp]:
@@ -301,16 +416,23 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
         # 获取现有IP列表
         existing_ips = [record["value"] for record in existing_records]
         
+        # 过滤黑名单IP（再次确保）
+        filtered_ips, blocked_ips = filter_blacklist_ips(new_ips)
+        
+        if not filtered_ips:
+            print(f"警告: 所有候选IP都在黑名单中，跳过更新")
+            return
+        
         # 限制新IP数量不超过affect_num，并选择性能最好的
-        if len(new_ips) > affect_num:
+        if len(filtered_ips) > affect_num:
             # 使用更严谨的排序选择最好的affect_num个IP
-            new_ips = sorted(
-                new_ips, 
+            filtered_ips = sorted(
+                filtered_ips, 
                 key=lambda x: get_sort_key(x, line_to_isp(line)),
                 reverse=True
             )[:affect_num]
         
-        new_ip_values = [ip_info["ip"] for ip_info in new_ips]
+        new_ip_values = [ip_info["ip"] for ip_info in filtered_ips]
         
         # 如果没有现有记录，需要创建新记录
         if not existing_records:
@@ -384,10 +506,17 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     lines = {"CM": "移动", "CU": "联通", "CT": "电信", "AB": "境外", "DEF": "默认"}
     line_chinese = lines[line]
     
+    # 过滤黑名单IP
+    filtered_c_info, blocked_ips = filter_blacklist_ips(c_info)
+    
+    if not filtered_c_info:
+        print(f"警告: 所有候选IP都在黑名单中，跳过更新 {sub_domain} - {line_chinese}")
+        return
+    
     # For Huawei Cloud DNS (dns_server == 3), use batch update with proper cleanup
     if config["dns_server"] == 3:
-        # Extract IPs from c_info
-        new_ips = [ip_info for ip_info in c_info]
+        # Extract IPs from filtered_c_info
+        new_ips = [ip_info for ip_info in filtered_c_info]
         
         # 调用修复后的批量更新函数
         batch_update_huawei_dns(cloud, domain, sub_domain, recordType, line_chinese, 
@@ -399,12 +528,12 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
         create_num = config["affect_num"] - len(s_info)
         if create_num == 0:
             for info in s_info:
-                if len(c_info) == 0:
+                if len(filtered_c_info) == 0:
                     break
                 # 选择IP时也考虑性能
-                c_info_sorted = sorted(c_info, key=lambda x: get_sort_key(x, line), reverse=True)
-                cf_ip_info = c_info_sorted[0]
-                c_info.remove(cf_ip_info)
+                filtered_c_info_sorted = sorted(filtered_c_info, key=lambda x: get_sort_key(x, line), reverse=True)
+                cf_ip_info = filtered_c_info_sorted[0]
+                filtered_c_info.remove(cf_ip_info)
                 cf_ip = cf_ip_info["ip"]
                 
                 if cf_ip in str(s_info):
@@ -416,12 +545,12 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
                     print("CHANGE DNS ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----DOMAIN: " + domain + "----SUBDOMAIN: " + sub_domain + "----RECORDLINE: "+line_chinese+"----RECORDID: " + str(info["recordId"]) + "----VALUE: " + cf_ip + "----MESSAGE: " + ret["message"] )
         elif create_num > 0:
             for i in range(create_num):
-                if len(c_info) == 0:
+                if len(filtered_c_info) == 0:
                     break
                 # 选择IP时也考虑性能
-                c_info_sorted = sorted(c_info, key=lambda x: get_sort_key(x, line), reverse=True)
-                cf_ip_info = c_info_sorted[0]
-                c_info.remove(cf_ip_info)
+                filtered_c_info_sorted = sorted(filtered_c_info, key=lambda x: get_sort_key(x, line), reverse=True)
+                cf_ip_info = filtered_c_info_sorted[0]
+                filtered_c_info.remove(cf_ip_info)
                 cf_ip = cf_ip_info["ip"]
                 
                 if cf_ip in str(s_info):
@@ -433,12 +562,12 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
                     print("CREATE DNS ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) + "----DOMAIN: " + domain + "----SUBDOMAIN: " + sub_domain + "----RECORDLINE: "+line_chinese+"----RECORDID: " + str(info["recordId"]) + "----VALUE: " + cf_ip + "----MESSAGE: " + ret["message"] )
         else:
             for info in s_info:
-                if create_num == 0 or len(c_info) == 0:
+                if create_num == 0 or len(filtered_c_info) == 0:
                     break
                 # 选择IP时也考虑性能
-                c_info_sorted = sorted(c_info, key=lambda x: get_sort_key(x, line), reverse=True)
-                cf_ip_info = c_info_sorted[0]
-                c_info.remove(cf_ip_info)
+                filtered_c_info_sorted = sorted(filtered_c_info, key=lambda x: get_sort_key(x, line), reverse=True)
+                cf_ip_info = filtered_c_info_sorted[0]
+                filtered_c_info.remove(cf_ip_info)
                 cf_ip = cf_ip_info["ip"]
                 
                 if cf_ip in str(s_info):
@@ -511,7 +640,7 @@ def main(cloud):
             cf_cuips = cfips["info"]["CU"]
             cf_ctips = cfips["info"]["CT"]
             
-            print(f"当前IP数量 - 移动: {len(cf_cmips)}, 联通: {len(cf_cuips)}, 电信: {len(cf_ctips)}")
+            print(f"当前IP数量（已过滤黑名单） - 移动: {len(cf_cmips)}, 联通: {len(cf_cuips)}, 电信: {len(cf_ctips)}")
             
             for domain, sub_domains in DOMAINS.items():
                 for sub_domain, lines in sub_domains.items():
