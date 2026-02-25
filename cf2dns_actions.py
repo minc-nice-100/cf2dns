@@ -19,8 +19,6 @@ config = json.loads(os.environ["CONFIG"])
 #CM:移动 CU:联通 CT:电信  AB:境外 DEF:默认
 #修改需要更改的dnspod域名和子域名
 DOMAINS = json.loads(os.environ["DOMAINS"])
-#获取服务商信息
-provider_data = json.loads(os.environ["PROVIDER"])
 
 # 新的API地址
 NEW_API_URL = "https://api.4ce.cn/api/bestCFIP"
@@ -199,7 +197,6 @@ def get_sort_key(ip_info, isp=None):
 def get_optimization_ip():
     """
     从多个API获取IP信息并合并
-    原API：通过provider_data中的配置获取
     新API：https://api.4ce.cn/api/bestCFIP
     VPS789 API：https://vps789.com/public/sum/cfIpApi
     """
@@ -210,36 +207,7 @@ def get_optimization_ip():
             "v6": {"CM": [], "CU": [], "CT": []}
         }
         
-        headers = {'Content-Type': 'application/json'}
-        
-        # 1. 从原API获取IP信息（获取v4和v6两种类型）
-        try:
-            for current_type in ["v4", "v6"]:
-                data = {"key": config["key"], "type": current_type}
-                provider = [item for item in provider_data if item['id'] == config["data_server"]][0]
-                response = requests.post(provider['get_ip_url'], json=data, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    old_data = response.json()
-                    if old_data and old_data.get("code") == 200:
-                        for isp in ["CM", "CU", "CT"]:
-                            if isp in old_data["info"]:
-                                for ip_info in old_data["info"][isp]:
-                                    # 确保ip_info是字典格式
-                                    if isinstance(ip_info, str):
-                                        ip_info = {"ip": ip_info}
-                                    elif isinstance(ip_info, dict) and "ip" not in ip_info:
-                                        # 如果字典中没有ip字段，尝试其他字段
-                                        if "value" in ip_info:
-                                            ip_info["ip"] = ip_info["value"]
-                                    
-                                    # 过滤黑名单IP
-                                    if not is_ip_blacklisted(ip_info.get("ip", "")):
-                                        merged_ips[current_type][isp].append(ip_info)
-                print(f"从原API获取到 {current_type} IP: {sum(len(merged_ips[current_type][isp]) for isp in ['CM','CU','CT'])} 个")
-        except Exception as e:
-            print(f"从原API获取IP失败: {str(e)}")
-        
-        # 2. 从新API (4ce.cn) 获取IP信息
+        # 1. 从新API (4ce.cn) 获取IP信息
         try:
             response = requests.get(NEW_API_URL, timeout=10)
             if response.status_code == 200:
@@ -266,7 +234,7 @@ def get_optimization_ip():
         except Exception as e:
             print(f"从4ce.cn API获取IP失败: {str(e)}")
         
-        # 3. 从VPS789 API获取IP信息
+        # 2. 从VPS789 API获取IP信息
         try:
             response = requests.get(VPS789_API_URL, timeout=10)
             if response.status_code == 200:
@@ -349,7 +317,7 @@ def get_optimization_ip():
         except Exception as e:
             print(f"从VPS789 API获取IP失败: {str(e)}")
         
-        # 4. 为每个版本和运营商去重（基于IP地址，并合并数据）
+        # 3. 为每个版本和运营商去重（基于IP地址，并合并数据）
         for version in ["v4", "v6"]:
             for isp in ["CM", "CU", "CT"]:
                 seen_ips = {}
@@ -368,7 +336,7 @@ def get_optimization_ip():
                                     existing[key] = value
                 merged_ips[version][isp] = unique_ips
         
-        # 5. 按速度或分数排序（使用严谨的排序函数）
+        # 4. 按速度或分数排序（使用严谨的排序函数）
         for version in ["v4", "v6"]:
             for isp in ["CM", "CU", "CT"]:
                 # 使用更严谨的排序，降序排列（值越大越好）
@@ -377,7 +345,7 @@ def get_optimization_ip():
                     reverse=True
                 )
         
-        # 6. 为当前iptype统计
+        # 5. 为当前iptype统计
         total_ips = sum(len(merged_ips[iptype][isp]) for isp in ["CM", "CU", "CT"])
         print(f"当前类型 {iptype} 总共获取到 {total_ips} 个IP（已过滤黑名单）")
         if total_ips > 0:
@@ -387,7 +355,7 @@ def get_optimization_ip():
                     best_score = get_sort_key(merged_ips[iptype][isp][0], isp)
                     print(f"  {isp}: {len(merged_ips[iptype][isp])} 个 (最佳IP: {best_ip}, 评分: {best_score:.2f})")
         
-        # 7. 构建返回数据，保持与原API相同的格式
+        # 6. 构建返回数据，保持与原API相同的格式
         result = {
             "code": 200,
             "info": {
