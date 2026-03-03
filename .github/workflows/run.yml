@@ -23,4 +23,6 @@ jobs:
           CONFIG: ${{ secrets.CONFIG }}
           DOMAINS: ${{ secrets.DOMAINS }}
           PROVIDER: ${{ secrets.PROVIDER }}
-        run: python cf2dns_actions.py > /dev/null
+          IPV4_CIDRS: ${{ secrets.IPV4_CIDRS }}
+          IPV6_CIDRS: ${{ secrets.IPV6_CIDRS }}
+        run: python cf2dns_actions.py  > /dev/null
