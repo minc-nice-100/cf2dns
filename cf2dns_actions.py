@@ -44,11 +44,11 @@ IPV4_CIDRS = get_cidrs_from_env("IPV4_CIDRS")
 # 从环境变量获取IPv6 CIDR列表
 IPV6_CIDRS = get_cidrs_from_env("IPV6_CIDRS")
 
-# 从环境变量获取每个运营商生成的IP数量（默认20）
+# 从环境变量获取每个运营商生成的IP数量（默认50）
 try:
-    IP_COUNT_PER_ISP = int(os.environ.get("IP_COUNT_PER_ISP", "20"))
+    IP_COUNT_PER_ISP = int(os.environ.get("IP_COUNT_PER_ISP", "50"))
 except ValueError:
-    IP_COUNT_PER_ISP = 20
+    IP_COUNT_PER_ISP = 50
 
 # 打印CIDR配置信息
 print("=" * 50)
