@@ -12,12 +12,19 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: actions/checkout@v3
+      
       - name: 'Set up Python'
         uses: actions/setup-python@v4
         with:
           python-version: '3.12'
+          cache: 'pip'  # 启用pip缓存
+      
       - name: 'Install dependencies'
-        run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        run: |
+          if [ -f requirements.txt ]; then 
+            pip install -r requirements.txt
+          fi
+      
       - name: 'run cf2dns'
         env:
           CONFIG: ${{ secrets.CONFIG }}
@@ -25,4 +32,4 @@ jobs:
           PROVIDER: ${{ secrets.PROVIDER }}
           IPV4_CIDRS: ${{ secrets.IPV4_CIDRS }}
           IPV6_CIDRS: ${{ secrets.IPV6_CIDRS }}
-        run: python cf2dns_actions.py  > /dev/null
+        run: python cf2dns_actions.py > /dev/null
