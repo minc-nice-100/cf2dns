@@ -5,6 +5,7 @@ on:
     branches: 
       - main
   repository_dispatch:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,20 +18,44 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.12'
-          cache: 'pip'  # 启用pip缓存
-
+          cache: 'pip'
+      
+      - name: 'Mask sensitive variables'
+        run: |
+          # 静默添加 mask，不产生任何输出
+          echo "::add-mask::${{ vars.IPV4_CIDRS }}" >/dev/null
+          echo "::add-mask::${{ vars.IPV6_CIDRS }}" >/dev/null
+          echo "::add-mask::${{ vars.DOMAINS }}" >/dev/null
           
+          # 可选：如果变量包含逗号分隔的多值，也可以逐个 mask
+          if [ -n "${{ vars.IPV4_CIDRS }}" ]; then
+            echo "${{ vars.IPV4_CIDRS }}" | tr ',' '\n' | while read line; do
+              if [ -n "$line" ]; then
+                echo "::add-mask::$line" >/dev/null
+              fi
+            done
+          fi
+        shell: bash
+      
       - name: 'Install dependencies'
         run: |
-          if [ -f requirements.txt ]; then 
-            pip install -r requirements.txt
-          fi
+          pip install -r requirements.txt >/dev/null 2>&1 || {
+            echo "::error::依赖安装失败"
+            exit 1
+          }
+        shell: bash
       
-      - name: 'run cf2dns'
+      - name: 'Run cf2dns'
+        env:
+          CONFIG: ${{ secrets.CONFIG }}
+          DOMAINS: ${{ vars.DOMAINS }}
+          PROVIDER: ${{ secrets.PROVIDER }}
+          IPV4_CIDRS: ${{ vars.IPV4_CIDRS }}
+          IPV6_CIDRS: ${{ vars.IPV6_CIDRS }}
+          GITHUB_ACTIONS: true
         run: |
-          export CONFIG="${{ secrets.CONFIG }}" \
-                 DOMAINS="${{ vars.DOMAINS }}" \
-                 PROVIDER="${{ secrets.PROVIDER }}" \
-                 IPV4_CIDRS="${{ vars.IPV4_CIDRS }}" \
-                 IPV6_CIDRS="${{ vars.IPV6_CIDRS }}"
-          python cf2dns_actions.py > /dev/null
+          python cf2dns_actions.py > /dev/null 2>&1 || {
+            echo "::error::cf2dns 执行失败"
+            exit 1
+          }
+        shell: bash
