@@ -548,7 +548,7 @@ def main(cloud):
 
             for domain, sub_domains in DOMAINS.items():
                 for sub_domain, lines in sub_domains.items():
-                    filtered_lines = [line for line in lines if line in ["CM", "CU", "CT"]]
+                    filtered_lines = [line for line in lines if line in ["CM", "CU", "CT", "AB", "DEF"]]
 
                     if not filtered_lines:
                         print(f"子域名 {sub_domain} 没有指定三网线路，跳过")
@@ -598,6 +598,11 @@ def main(cloud):
                                 changeDNS("CU", cu_info, temp_cf_cuips, domain, sub_domain, cloud)
                             elif line == "CT":
                                 changeDNS("CT", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
+                            elif line == "AB":
+                                changeDNS("AB", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
+                            elif line == "DEF":
+                                changeDNS("DEF", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
+                            
 
         except Exception as e:
             traceback.print_exc()  
