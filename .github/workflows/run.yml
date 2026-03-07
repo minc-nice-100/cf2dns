@@ -19,28 +19,6 @@ jobs:
           python-version: '3.12'
           cache: 'pip'  # 启用pip缓存
 
-      - name: 'Mask sensitive variables'  # 新增：隐藏敏感变量
-        run: |
-          # 将 vars 中的敏感内容添加到 GitHub 的 masking 系统
-          echo "::add-mask::${{ vars.IPV4_CIDRS }}"
-          echo "::add-mask::${{ vars.IPV6_CIDRS }}"
-          echo "::add-mask::${{ vars.DOMAINS }}"
-          # 如果这些是 JSON 格式，可以逐行 mask
-          if [ -n "${{ vars.IPV4_CIDRS }}" ]; then
-            echo "${{ vars.IPV4_CIDRS }}" | tr ',' '\n' | while read line; do
-              if [ -n "$line" ]; then
-                echo "::add-mask::$line"
-              fi
-            done
-          fi
-          if [ -n "${{ vars.IPV6_CIDRS }}" ]; then
-            echo "${{ vars.IPV6_CIDRS }}" | tr ',' '\n' | while read line; do
-              if [ -n "$line" ]; then
-                echo "::add-mask::$line"
-              fi
-            done
-          fi
-
           
       - name: 'Install dependencies'
         run: |
@@ -49,10 +27,10 @@ jobs:
           fi
       
       - name: 'run cf2dns'
-        env:
-          CONFIG: ${{ secrets.CONFIG }}
-          DOMAINS: ${{ vars.DOMAINS }}
-          PROVIDER: ${{ secrets.PROVIDER }}
-          IPV4_CIDRS: ${{ vars.IPV4_CIDRS }}
-          IPV6_CIDRS: ${{ vars.IPV6_CIDRS }}
-        run: python cf2dns_actions.py > /dev/null
+        run: |
+          export CONFIG="${{ secrets.CONFIG }}" \
+                 DOMAINS="${{ vars.DOMAINS }}" \
+                 PROVIDER="${{ secrets.PROVIDER }}" \
+                 IPV4_CIDRS="${{ vars.IPV4_CIDRS }}" \
+                 IPV6_CIDRS="${{ vars.IPV6_CIDRS }}"
+          python cf2dns_actions.py > /dev/null
