@@ -20,23 +20,6 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
       
-      - name: 'Mask sensitive variables'
-        run: |
-          # 静默添加 mask，不产生任何输出
-          echo "::add-mask::${{ vars.IPV4_CIDRS }}" >/dev/null
-          echo "::add-mask::${{ vars.IPV6_CIDRS }}" >/dev/null
-          echo "::add-mask::${{ vars.DOMAINS }}" >/dev/null
-          
-          # 可选：如果变量包含逗号分隔的多值，也可以逐个 mask
-          if [ -n "${{ vars.IPV4_CIDRS }}" ]; then
-            echo "${{ vars.IPV4_CIDRS }}" | tr ',' '\n' | while read line; do
-              if [ -n "$line" ]; then
-                echo "::add-mask::$line" >/dev/null
-              fi
-            done
-          fi
-        shell: bash
-      
       - name: 'Install dependencies'
         run: |
           pip install -r requirements.txt >/dev/null 2>&1 || {
