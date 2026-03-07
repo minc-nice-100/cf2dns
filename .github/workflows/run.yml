@@ -28,8 +28,8 @@ jobs:
       - name: 'run cf2dns'
         env:
           CONFIG: ${{ secrets.CONFIG }}
-          DOMAINS: ${{ env.DOMAINS }}
+          DOMAINS: ${{ vars.DOMAINS }}
           PROVIDER: ${{ secrets.PROVIDER }}
-          IPV4_CIDRS: ${{ env.IPV4_CIDRS }}
-          IPV6_CIDRS: ${{ env.IPV6_CIDRS }}
+          IPV4_CIDRS: ${{ vars.IPV4_CIDRS }}
+          IPV6_CIDRS: ${{ vars.IPV6_CIDRS }}
         run: python cf2dns_actions.py > /dev/null
