@@ -5,6 +5,135 @@
 import sys, os, json, requests, time, base64, shutil, random, traceback
 import ipaddress
 
+# ==================== 华为云DNS API模块 ====================
+from huaweicloudsdkcore.auth.credentials import BasicCredentials
+from huaweicloudsdkdns.v2 import *
+from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
+
+class HuaWeiApi():
+    def __init__(self, ACCESSID, SECRETKEY, REGION = 'cn-east-3'):
+        self.AK = ACCESSID
+        self.SK = SECRETKEY
+        self.region = REGION
+        self.client = DnsClient.new_builder().with_credentials(BasicCredentials(self.AK, self.SK)).with_region(DnsRegion.value_of(self.region)).build()
+        self.zone_id = self.get_zones()
+
+    def del_record(self, domain, record):
+        request = DeleteRecordSetsRequest()
+        request.zone_id = self.zone_id[domain + '.']
+        request.recordset_id = record
+        response = self.client.delete_record_sets(request)
+        result = json.loads(str(response))
+        print(result)
+        return result
+
+    def get_record(self, domain, length, sub_domain, record_type):
+        request = ListRecordSetsWithLineRequest()
+        request.limit = length
+        request.type = record_type
+        if sub_domain == '@':
+            request.name = domain + "."
+        else:
+            request.name = sub_domain + '.' + domain + "."
+        response = self.client.list_record_sets_with_line(request)
+        data = json.loads(str(response))
+        result = {}
+        records_temp = []
+        for record in data['recordsets']:
+            if (sub_domain == '@' and domain + "." == record['name']) or (sub_domain + '.' + domain + "." == record['name']):
+                record['line'] = self.line_format(record['line'])
+                # 获取记录的values列表
+                if 'records' in record and record['records']:
+                    # 对于多条记录，我们只取第一条用于兼容性
+                    record['value'] = record['records'][0] if record['records'] else ''
+                records_temp.append(record)
+        result['data'] = {'records': records_temp}
+        return result
+
+    def create_record(self, domain, sub_domain, value, record_type, line, ttl):
+        request = CreateRecordSetWithLineRequest()
+        request.zone_id = self.zone_id[domain + '.']
+        if sub_domain == '@':
+            name = domain + "."
+        else:
+            name = sub_domain + '.' + domain + "."
+        
+        # value可以是单个IP或IP列表
+        records = value if isinstance(value, list) else [value]
+        
+        request.body = CreateRecordSetWithLineReq(
+            type = record_type,
+            name = name,
+            ttl = ttl,
+            weight = 1,
+            records = records,
+            line = self.line_format(line)
+        )
+        response = self.client.create_record_set_with_line(request)
+        result = json.loads(str(response))
+        return result
+        
+    def change_record(self, domain, record_id, sub_domain, value, record_type, line, ttl):
+        """
+        更新记录集，支持单个IP或IP列表
+        :param value: 可以是单个IP字符串，也可以是IP列表
+        """
+        request = UpdateRecordSetRequest()
+        request.zone_id = self.zone_id[domain + '.']
+        request.recordset_id = record_id
+        if sub_domain == '@':
+            name = domain + "."
+        else:
+            name = sub_domain + '.' + domain + "."
+        
+        # value可以是单个IP或IP列表
+        records = value if isinstance(value, list) else [value]
+        
+        request.body = UpdateRecordSetReq(
+            name = name,
+            type = record_type,
+            ttl = ttl,
+            records = records
+        )
+        response = self.client.update_record_set(request)
+        result = json.loads(str(response))
+        return result
+
+    def get_zones(self):
+        request = ListPublicZonesRequest()
+        response = self.client.list_public_zones(request)
+        result = json.loads(str(response))
+        zone_id = {}
+        for zone in result['zones']:
+            zone_id[zone['name']] = zone['id'] 
+        return zone_id
+
+    def line_format(self, line):
+        lines = {
+            # 中文转华为云线路代码
+            '默认' : 'default_view',
+            '电信' : 'Dianxin',
+            '联通' : 'Liantong',
+            '移动' : 'Yidong',
+            '教育网' : 'Education',
+            '铁通' : 'Tietong',
+            '鹏博士' : 'Drpeng',
+            '境外' : 'Abroad',
+            
+            # 华为云线路代码转中文（用于get_record返回）
+            'default_view' : '默认',
+            'Dianxin' : '电信',
+            'Liantong' : '联通',
+            'Yidong' : '移动',
+            'Education' : '教育网',
+            'Tietong' : '铁通',
+            'Drpeng' : '鹏博士',
+            'Abroad' : '境外',
+        }
+        return lines.get(line, line)  # 如果找不到映射，返回原值
+
+# ==================== 主程序部分 ====================
+
 # 从环境变量获取配置
 config = json.loads(os.environ["CONFIG"])
 # CM:移动 CU:联通 CT:电信 ED:教育网 TT:铁通 PBS:鹏博士 DEF:默认
@@ -257,8 +386,7 @@ def get_random_ips():
     
     return result
 
-# ==================== 导入华为云DNS模块 ====================
-from dns.huawei import HuaWeiApi
+# ==================== DNS更新函数 ====================
 
 def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existing_records, new_ips, ttl, affect_num):
     """批量更新华为云DNS记录"""
