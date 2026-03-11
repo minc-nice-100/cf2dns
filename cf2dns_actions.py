@@ -7,7 +7,7 @@ import ipaddress
 
 # 从环境变量获取配置
 config = json.loads(os.environ["CONFIG"])
-# CM:移动 CU:联通 CT:电信 AB:境外 DEF:默认
+# CM:移动 CU:联通 CT:电信 ED:教育网 TT:铁通 PBS:鹏博士 DEF:默认
 DOMAINS = json.loads(os.environ["DOMAINS"])
 # 获取服务商信息
 provider_data = json.loads(os.environ["PROVIDER"])
@@ -217,18 +217,23 @@ def generate_random_ips_from_cidrs(cidr_list, count, is_v6=False):
 def get_random_ips():
     """
     从CIDR生成IP信息
+    支持所有线路类型
     """
-    # 存储生成的IP信息
+    # 存储生成的IP信息 - 扩展支持所有线路
     generated_ips = {
-        "v4": {"CM": [], "CU": [], "CT": []},
-        "v6": {"CM": [], "CU": [], "CT": []}
+        "v4": {"CM": [], "CU": [], "CT": [], "ED": [], "TT": [], "PBS": [], "DEF": []},
+        "v6": {"CM": [], "CU": [], "CT": [], "ED": [], "TT": [], "PBS": [], "DEF": []}
     }
+    
+    # 所有支持的线路
+    all_isps = ["CM", "CU", "CT", "ED", "TT", "PBS", "DEF"]
+    isp_count = len(all_isps)
     
     # 从IPv4 CIDR生成IP
     if IPV4_CIDRS:
-        ipv4_ips = generate_random_ips_from_cidrs(IPV4_CIDRS, IP_COUNT_PER_ISP * 3, is_v6=False)
-        # 平均分配给三个运营商
-        for i, isp in enumerate(["CM", "CU", "CT"]):
+        ipv4_ips = generate_random_ips_from_cidrs(IPV4_CIDRS, IP_COUNT_PER_ISP * isp_count, is_v6=False)
+        # 平均分配给所有运营商
+        for i, isp in enumerate(all_isps):
             start_idx = i * IP_COUNT_PER_ISP
             end_idx = start_idx + IP_COUNT_PER_ISP
             if start_idx < len(ipv4_ips):
@@ -236,9 +241,9 @@ def get_random_ips():
     
     # 从IPv6 CIDR生成IP
     if IPV6_CIDRS:
-        ipv6_ips = generate_random_ips_from_cidrs(IPV6_CIDRS, IP_COUNT_PER_ISP * 3, is_v6=True)
-        # 平均分配给三个运营商
-        for i, isp in enumerate(["CM", "CU", "CT"]):
+        ipv6_ips = generate_random_ips_from_cidrs(IPV6_CIDRS, IP_COUNT_PER_ISP * isp_count, is_v6=True)
+        # 平均分配给所有运营商
+        for i, isp in enumerate(all_isps):
             start_idx = i * IP_COUNT_PER_ISP
             end_idx = start_idx + IP_COUNT_PER_ISP
             if start_idx < len(ipv6_ips):
@@ -247,11 +252,7 @@ def get_random_ips():
     # 构建返回数据
     result = {
         "code": 200,
-        "info": {
-            "CM": generated_ips[iptype]["CM"],
-            "CU": generated_ips[iptype]["CU"],
-            "CT": generated_ips[iptype]["CT"]
-        }
+        "info": generated_ips[iptype]
     }
     
     return result
@@ -264,7 +265,7 @@ def batch_update_huawei_dns(cloud, domain, sub_domain, record_type, line, existi
     try:
         existing_ips = [record["value"] for record in existing_records]
         
-        # 直接使用新IP，不进行排序（因为现在都是随机IP，没有性能数据）
+        # 直接使用新IP，随机选择
         if len(new_ips) > affect_num:
             # 随机选择 affect_num 个IP
             selected_ips = random.sample(new_ips, affect_num)
@@ -313,7 +314,16 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
     else:
         recordType = "A"
 
-    lines = {"CM": "移动", "CU": "联通", "CT": "电信", "AB": "境外", "DEF": "默认"}
+    # 线路映射 - 扩展支持所有线路
+    lines = {
+        "CM": "移动", 
+        "CU": "联通", 
+        "CT": "电信", 
+        "ED": "教育网", 
+        "TT": "铁通", 
+        "PBS": "鹏博士", 
+        "DEF": "默认"
+    }
     line_chinese = lines[line]
 
     filtered_c_info, blocked_ips = filter_blacklist_ips(c_info)
@@ -356,64 +366,75 @@ def main(cloud):
     else:
         recordType = "A"
 
-    three_net_lines = ["移动", "联通", "电信"]
+    # 所有支持的线路中文名称
+    all_net_lines = ["移动", "联通", "电信", "教育网", "铁通", "鹏博士", "默认"]
+    
+    # 线路代码映射
+    line_codes = ["CM", "CU", "CT", "ED", "TT", "PBS", "DEF"]
 
     if len(DOMAINS) > 0:
         try:
-            # 使用新的get_random_ips生成IP
+            # 使用get_random_ips生成IP
             cfips = get_random_ips()
             if cfips == None or cfips["code"] != 200:
                 print("GET IP ERROR: ----Time: " + str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) )
                 return
-            cf_cmips = cfips["info"]["CM"]
-            cf_cuips = cfips["info"]["CU"]
-            cf_ctips = cfips["info"]["CT"]
-
-            print(f"当前IP数量（已过滤黑名单） - 移动: {len(cf_cmips)}, 联通: {len(cf_cuips)}, 电信: {len(cf_ctips)}")
+            
+            # 获取各线路的IP
+            line_ips = {}
+            for line_code in line_codes:
+                line_ips[line_code] = cfips["info"].get(line_code, [])
+                print(f"{line_code} IP数量: {len(line_ips[line_code])}")
 
             for domain, sub_domains in DOMAINS.items():
                 for sub_domain, lines in sub_domains.items():
-                    filtered_lines = [line for line in lines if line in ["CM", "CU", "CT"]]
+                    # 过滤出支持的线路
+                    filtered_lines = [line for line in lines if line in line_codes]
 
                     if not filtered_lines:
-                        print(f"子域名 {sub_domain} 没有指定三网线路，跳过")
+                        print(f"子域名 {sub_domain} 没有指定有效线路，跳过")
                         continue
 
-                    cleanup_extra_records(cloud, domain, sub_domain, recordType, three_net_lines)
+                    # 检查当前域名的记录
+                    cleanup_extra_records(cloud, domain, sub_domain, recordType, all_net_lines)
 
-                    temp_cf_cmips = cf_cmips.copy()
-                    temp_cf_cuips = cf_cuips.copy()
-                    temp_cf_ctips = cf_ctips.copy()
-
+                    # 获取当前DNS记录
                     ret = cloud.get_record(domain, 100, sub_domain, recordType)
 
-                    cm_info = []
-                    cu_info = []
-                    ct_info = []
-
+                    # 按线路分类现有记录
+                    line_info = {line: [] for line in line_codes}
+                    
                     for record in ret["data"]["records"]:
                         info = {}
                         info["recordId"] = record["id"]
                         info["value"] = record["value"]
 
                         line_name = record["line"]
-
+                        
+                        # 将中文线路名映射回代码
                         if line_name == "移动":
-                            cm_info.append(info)
+                            line_info["CM"].append(info)
                         elif line_name == "联通":
-                            cu_info.append(info)
+                            line_info["CU"].append(info)
                         elif line_name == "电信":
-                            ct_info.append(info)
+                            line_info["CT"].append(info)
+                        elif line_name == "教育网":
+                            line_info["ED"].append(info)
+                        elif line_name == "铁通":
+                            line_info["TT"].append(info)
+                        elif line_name == "鹏博士":
+                            line_info["PBS"].append(info)
+                        elif line_name == "默认":
+                            line_info["DEF"].append(info)
 
-                    print(f"当前三网记录数量 - 移动: {len(cm_info)}, 联通: {len(cu_info)}, 电信: {len(ct_info)}")
+                    # 打印当前各线路记录数量
+                    print(f"子域名 {sub_domain} 当前各线路记录数量:")
+                    for line_code in line_codes:
+                        print(f"  {line_code}: {len(line_info[line_code])} 条")
 
+                    # 更新指定线路的DNS记录
                     for line in filtered_lines:
-                        if line == "CM":
-                            changeDNS("CM", cm_info, temp_cf_cmips, domain, sub_domain, cloud)
-                        elif line == "CU":
-                            changeDNS("CU", cu_info, temp_cf_cuips, domain, sub_domain, cloud)
-                        elif line == "CT":
-                            changeDNS("CT", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
+                        changeDNS(line, line_info[line], line_ips[line].copy(), domain, sub_domain, cloud)
 
         except Exception as e:
             traceback.print_exc()  
