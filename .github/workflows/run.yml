@@ -12,20 +12,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 'Checkout'
-        uses: actions/checkout@v3
-      
+        uses: actions/checkout@v4  # 从 v3 升级到 v4
+        
       - name: 'Set up Python'
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # 从 v4 升级到 v5
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: 'requirements.txt'  # 明确指定依赖文件
+      
+      - name: 'Cache pip packages'  # 添加 pip 缓存加速
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
       
       - name: 'Install dependencies'
         run: |
-          pip install -r requirements.txt >/dev/null 2>&1 || {
-            echo "::error::依赖安装失败"
-            exit 1
-          }
+          # 显示安装进度但不显示详细信息
+          pip install -r requirements.txt  >> cf2dns.log 2>&1
         shell: bash
       
       - name: 'Run cf2dns'
@@ -35,10 +42,23 @@ jobs:
           PROVIDER: ${{ secrets.PROVIDER }}
           IPV4_CIDRS: ${{ vars.IPV4_CIDRS }}
           IPV6_CIDRS: ${{ vars.IPV6_CIDRS }}
+          CUSTOM_BLACKLIST: ${{ vars.CUSTOM_BLACKLIST }}  # 添加黑名单变量
+          IP_COUNT_PER_ISP: ${{ vars.IP_COUNT_PER_ISP }}  # 添加IP数量变量
           GITHUB_ACTIONS: true
         run: |
-          python cf2dns_actions.py > /dev/null 2>&1 || {
+          python cf2dns_actions.py >> cf2dns.log 2>&1 || {
             echo "::error::cf2dns 执行失败"
+            cat cf2dns.log  # 失败时才显示日志
             exit 1
           }
         shell: bash
+      
+      - name: 'Upload logs on failure'  # 失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-logs
+          path: |
+            *.log
+            !*.pyc
+          retention-days: 7
