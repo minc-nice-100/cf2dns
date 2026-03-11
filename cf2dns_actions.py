@@ -6,7 +6,10 @@ import ipaddress
 
 # ==================== 从环境变量获取配置 ====================
 config = json.loads(os.environ["CONFIG"])
-# 格式: {"saas.itedev.com": {"cn": 33}}  # cn是组数，33表示33组
+# 格式: 
+# {
+#   "saas.itedev.com": {"cn": 33}  # 主域名: saas.itedev.com, 子域名前缀: cn, 组数: 33
+# }
 DOMAINS = json.loads(os.environ["DOMAINS"])
 
 # ==================== 从环境变量获取CIDR配置 ====================
@@ -81,8 +84,7 @@ def flatten_cidrs(cidr_list, is_v6=False):
                 # IPv6: 排除网络地址
                 if network.num_addresses <= 1:
                     continue
-                # IPv6地址空间太大，不能全部展开，随机采样
-                # 这里我们生成一个范围内的随机IP
+                # IPv6地址空间太大，随机采样
                 first = int(network.network_address)
                 last = int(network.broadcast_address) if network.broadcast_address else first + network.num_addresses - 1
                 
@@ -141,44 +143,36 @@ def get_zone_id(domain):
             return zone['id']
     return None
 
-def get_record_sets(zone_id, sub_domain, domain):
-    """获取指定子域名的所有记录集"""
+def get_record_sets(zone_id, full_domain):
+    """获取指定域名的所有记录集"""
     request = ListRecordSetsWithLineRequest()
     request.limit = 100
-    
-    if sub_domain == '@':
-        request.name = domain + "."
-    else:
-        request.name = sub_domain + '.' + domain + "."
+    request.name = full_domain + "."
     
     response = client.list_record_sets_with_line(request)
     data = json.loads(str(response))
     
     records = []
     for record in data.get('recordsets', []):
-        records.append({
-            'id': record['id'],
-            'name': record['name'],
-            'type': record['type'],
-            'records': record.get('records', []),
-            'line': record.get('line', ''),
-            'ttl': record.get('ttl', 300)
-        })
+        if record['name'] == full_domain + ".":
+            records.append({
+                'id': record['id'],
+                'name': record['name'],
+                'type': record['type'],
+                'records': record.get('records', []),
+                'line': record.get('line', ''),
+                'ttl': record.get('ttl', 300)
+            })
     return records
 
-def create_record_set(zone_id, sub_domain, domain, record_type, ips, ttl=600):
+def create_record_set(zone_id, full_domain, record_type, ips, ttl=600):
     """创建记录集"""
     request = CreateRecordSetWithLineRequest()
     request.zone_id = zone_id
     
-    if sub_domain == '@':
-        name = domain + "."
-    else:
-        name = sub_domain + '.' + domain + "."
-    
     request.body = CreateRecordSetWithLineReq(
         type=record_type,
-        name=name,
+        name=full_domain + ".",
         ttl=ttl,
         records=ips,
         line='default_view'  # 全部使用默认线路
@@ -187,19 +181,14 @@ def create_record_set(zone_id, sub_domain, domain, record_type, ips, ttl=600):
     response = client.create_record_set_with_line(request)
     return json.loads(str(response))
 
-def update_record_set(zone_id, record_id, sub_domain, domain, record_type, ips, ttl=600):
+def update_record_set(zone_id, record_id, full_domain, record_type, ips, ttl=600):
     """更新记录集"""
     request = UpdateRecordSetRequest()
     request.zone_id = zone_id
     request.recordset_id = record_id
     
-    if sub_domain == '@':
-        name = domain + "."
-    else:
-        name = sub_domain + '.' + domain + "."
-    
     request.body = UpdateRecordSetReq(
-        name=name,
+        name=full_domain + ".",
         type=record_type,
         ttl=ttl,
         records=ips
@@ -226,29 +215,28 @@ if __name__ == '__main__':
         print("错误: IPv6池为空")
         sys.exit(1)
     
-    # 遍历所有域名
-    for domain, configs in DOMAINS.items():
-        # 获取组数
-        group_count = configs.get("cn", 0)
-        if group_count <= 0:
-            print(f"跳过 {domain}: 组数无效 {group_count}")
-            continue
-        
-        print(f"\n处理域名: {domain}")
-        print(f"需要 {group_count} 组记录 (每组: 2个IPv4 + 2个IPv6)")
-        
-        # 获取域名ID
-        zone_id = get_zone_id(domain)
+    # 遍历所有主域名配置
+    for main_domain, sub_configs in DOMAINS.items():
+        # 获取主域名ID
+        zone_id = get_zone_id(main_domain)
         if not zone_id:
-            print(f"错误: 找不到域名 {domain}")
+            print(f"错误: 找不到主域名 {main_domain}")
             continue
         
-        # 处理每个子域名
-        for sub_domain in ['@']:  # 这里可以扩展，目前只处理主域名
-            print(f"\n子域名: {sub_domain}")
+        # 遍历每个子域名配置
+        for sub_prefix, group_count in sub_configs.items():
+            if group_count <= 0:
+                print(f"跳过 {sub_prefix}.{main_domain}: 组数无效 {group_count}")
+                continue
+            
+            # 构建完整的子域名
+            full_sub_domain = f"{sub_prefix}.{main_domain}"
+            
+            print(f"\n处理域名: {full_sub_domain}")
+            print(f"需要 {group_count} 组记录 (每组: 2个IPv4 + 2个IPv6)")
             
             # 获取当前所有记录集
-            existing_records = get_record_sets(zone_id, sub_domain, domain)
+            existing_records = get_record_sets(zone_id, full_sub_domain)
             
             # 分离A和AAAA记录（只处理默认线路）
             a_records = [r for r in existing_records if r['type'] == 'A' and r['line'] == 'default_view']
@@ -279,26 +267,26 @@ if __name__ == '__main__':
                     if i < len(a_records):
                         # 更新现有记录
                         try:
-                            update_record_set(zone_id, a_records[i]['id'], sub_domain, domain, 'A', ip_pair, config["ttl"])
-                            print(f"更新A记录[{i}]: {ip_pair}")
+                            update_record_set(zone_id, a_records[i]['id'], full_sub_domain, 'A', ip_pair, config["ttl"])
+                            print(f"  更新A记录[{i}]: {ip_pair}")
                         except Exception as e:
-                            print(f"更新A记录[{i}]失败: {str(e)}")
+                            print(f"  更新A记录[{i}]失败: {str(e)}")
                     else:
                         # 创建新记录
                         try:
-                            create_record_set(zone_id, sub_domain, domain, 'A', ip_pair, config["ttl"])
-                            print(f"创建A记录[{i}]: {ip_pair}")
+                            create_record_set(zone_id, full_sub_domain, 'A', ip_pair, config["ttl"])
+                            print(f"  创建A记录[{i}]: {ip_pair}")
                         except Exception as e:
-                            print(f"创建A记录[{i}]失败: {str(e)}")
+                            print(f"  创建A记录[{i}]失败: {str(e)}")
                 
                 # 删除多余的A记录
                 if len(a_records) > target_a_count:
                     for extra in a_records[target_a_count:]:
                         try:
                             delete_record_set(zone_id, extra['id'])
-                            print(f"删除多余A记录: {extra['id']} - {extra['records']}")
+                            print(f"  删除多余A记录: {extra['id']} - {extra['records']}")
                         except Exception as e:
-                            print(f"删除A记录失败: {str(e)}")
+                            print(f"  删除A记录失败: {str(e)}")
             
             # 处理AAAA记录
             if target_aaaa_count > 0:
@@ -318,27 +306,27 @@ if __name__ == '__main__':
                     if i < len(aaaa_records):
                         # 更新现有记录
                         try:
-                            update_record_set(zone_id, aaaa_records[i]['id'], sub_domain, domain, 'AAAA', ip_pair, config["ttl"])
-                            print(f"更新AAAA记录[{i}]: {ip_pair}")
+                            update_record_set(zone_id, aaaa_records[i]['id'], full_sub_domain, 'AAAA', ip_pair, config["ttl"])
+                            print(f"  更新AAAA记录[{i}]: {ip_pair}")
                         except Exception as e:
-                            print(f"更新AAAA记录[{i}]失败: {str(e)}")
+                            print(f"  更新AAAA记录[{i}]失败: {str(e)}")
                     else:
                         # 创建新记录
                         try:
-                            create_record_set(zone_id, sub_domain, domain, 'AAAA', ip_pair, config["ttl"])
-                            print(f"创建AAAA记录[{i}]: {ip_pair}")
+                            create_record_set(zone_id, full_sub_domain, 'AAAA', ip_pair, config["ttl"])
+                            print(f"  创建AAAA记录[{i}]: {ip_pair}")
                         except Exception as e:
-                            print(f"创建AAAA记录[{i}]失败: {str(e)}")
+                            print(f"  创建AAAA记录[{i}]失败: {str(e)}")
                 
                 # 删除多余的AAAA记录
                 if len(aaaa_records) > target_aaaa_count:
                     for extra in aaaa_records[target_aaaa_count:]:
                         try:
                             delete_record_set(zone_id, extra['id'])
-                            print(f"删除多余AAAA记录: {extra['id']} - {extra['records']}")
+                            print(f"  删除多余AAAA记录: {extra['id']} - {extra['records']}")
                         except Exception as e:
-                            print(f"删除AAAA记录失败: {str(e)}")
+                            print(f"  删除AAAA记录失败: {str(e)}")
             
-            print(f"完成 {sub_domain}.{domain}")
+            print(f"完成 {full_sub_domain}")
     
     print("\n所有操作完成")
