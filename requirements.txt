@@ -1,0 +1,18 @@
+# 华为云相关
+huaweicloudsdkcore==3.1.5
+huaweicloudsdkdns==3.1.5
+
+# 网络请求
+requests==2.31.0
+urllib3==2.6.3
+certifi==2026.1.4
+idna==3.11
+charset-normalizer==3.4.4
+
+# 其他依赖
+ipaddress>=1.0.0  # 用于CIDR处理
+PyYAML==6.0.3     # YAML处理（如果需要）
+six==1.17.0       # Python 2/3兼容性
+
+# 可选但建议保留的工具
+simplejson==3.17.0  # 更好的JSON处理
