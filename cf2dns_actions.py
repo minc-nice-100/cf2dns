@@ -10,10 +10,11 @@ config = json.loads(os.environ["CONFIG"])
 # 格式: 
 # {
 #   "saas.itedev.com": {
-#     "cn": 4,           # 生成A/AAAA记录
-#     "cn1": 4           # 生成A/AAAA记录
-#     "@": 2             # 主域名记录
-#     # "def" 自动处理，通过DoH解析CNAME目标得到IP
+#     "cn": 4,           # 生成A/AAAA记录，每组2个IP
+#     "cn1": 4,
+#     "@": 2,
+#     "def": 2,          # 使用DoH解析得到的IP池分组
+#     "test": 0          # 新增：0表示全部IP写入一条记录（DoH模式）
 #   }
 # }
 DOMAINS = json.loads(os.environ["DOMAINS"])
@@ -205,13 +206,16 @@ IPV6_POOL = flatten_cidrs(IPV6_CIDRS, is_v6=True)
 print(f"IPv4池: {len(IPV4_POOL)} 个可用IP")
 print(f"IPv6池: {len(IPV6_POOL)} 个可用IP")
 
-# 检查是否有 def 子域名需要处理
-has_def = any('def' in sub_configs for sub_configs in DOMAINS.values())
-if has_def:
+# 判断是否需要提前解析 DoH（存在值为0的子域名 或 存在def子域名）
+need_doh = any(
+    any(v == 0 for v in sub_configs.values()) or 'def' in sub_configs
+    for sub_configs in DOMAINS.values()
+)
+if need_doh:
     CNAME_IPS = get_cname_target_ips()
 else:
     CNAME_IPS = {'v4': [], 'v6': []}
-    print("\n没有 def 子域名，跳过 DoH 解析")
+    print("\n没有需要DoH解析的域名，跳过 DoH 解析")
 
 def get_random_ips_from_pool(pool, count):
     """从IP池中随机获取指定数量的IP"""
@@ -247,17 +251,15 @@ def get_zone_id(domain):
 def get_record_sets(zone_id, full_domain):
     """
     获取指定域名的所有记录集（带分页，兼容名称末尾点）
-    ✅ 修复点：添加 zone_id，使用分页，统一名称比较
     """
     all_records = []
     offset = 0
     limit = 100
-    # 保证查询名称以点结尾
     query_name = full_domain.rstrip('.') + '.'
 
     while True:
         request = ListRecordSetsWithLineRequest()
-        request.zone_id = zone_id          # ✅ 必须设置 zone_id
+        request.zone_id = zone_id
         request.limit = limit
         request.offset = offset
         request.name = query_name
@@ -266,7 +268,6 @@ def get_record_sets(zone_id, full_domain):
         data = json.loads(str(response))
         recordsets = data.get('recordsets', [])
 
-        # 过滤出完全匹配的域名（去掉末尾点比较）
         for record in recordsets:
             if record['name'].rstrip('.') == full_domain.rstrip('.'):
                 all_records.append({
@@ -326,7 +327,6 @@ def delete_record_set(zone_id, record_id):
 
 # ==================== 主逻辑 ====================
 if __name__ == '__main__':
-    # 读取 TTL 配置，如果没有则默认 600
     default_ttl = config.get("ttl", 600)
 
     for main_domain, sub_configs in DOMAINS.items():
@@ -336,124 +336,135 @@ if __name__ == '__main__':
             continue
         
         for sub_prefix, group_count in sub_configs.items():
-            if group_count <= 0:
-                if sub_prefix == "@":
-                    print(f"跳过 {main_domain}: 组数无效 {group_count}")
-                else:
-                    print(f"跳过 {sub_prefix}.{main_domain}: 组数无效 {group_count}")
-                continue
-            
-            # 构建完整的子域名
+            # 构建完整子域名
             if sub_prefix == "@":
                 full_sub_domain = main_domain
                 display_name = main_domain
-                print(f"\n处理域名: {display_name} (主域名 @ 记录)")
             else:
                 full_sub_domain = f"{sub_prefix}.{main_domain}"
                 display_name = full_sub_domain
-                print(f"\n处理域名: {display_name}")
-            
-            print(f"需要 {group_count} 组记录 (每组: 2个IPv4 + 2个IPv6)")
-            
-            # 判断是否是特殊的 def 子域名
+
+            print(f"\n处理域名: {display_name} (配置值: {group_count})")
+
+            # ---------- 特殊处理：group_count == 0 表示 DoH 模式（全部IP写入一条记录） ----------
+            if group_count == 0:
+                print(f"  DoH模式: 将解析到的全部IP写入一条A记录和一条AAAA记录")
+                existing_records = get_record_sets(zone_id, full_sub_domain)
+                a_records = [r for r in existing_records if r['type'] == 'A' and r['line'] == 'default_view']
+                aaaa_records = [r for r in existing_records if r['type'] == 'AAAA' and r['line'] == 'default_view']
+
+                ipv4_list = [ip['ip'] for ip in CNAME_IPS['v4']]
+                ipv6_list = [ip['ip'] for ip in CNAME_IPS['v6']]
+
+                # 处理 A 记录
+                if ipv4_list:
+                    if a_records:
+                        update_record_set(zone_id, a_records[0]['id'], full_sub_domain, 'A', ipv4_list, default_ttl)
+                        print(f"  更新A记录: {ipv4_list}")
+                        for extra in a_records[1:]:
+                            delete_record_set(zone_id, extra['id'])
+                            print(f"  删除多余A记录: {extra['id']}")
+                    else:
+                        create_record_set(zone_id, full_sub_domain, 'A', ipv4_list, default_ttl)
+                        print(f"  创建A记录: {ipv4_list}")
+                else:
+                    for rec in a_records:
+                        delete_record_set(zone_id, rec['id'])
+                        print(f"  删除A记录: {rec['id']}")
+
+                # 处理 AAAA 记录
+                if ipv6_list:
+                    if aaaa_records:
+                        update_record_set(zone_id, aaaa_records[0]['id'], full_sub_domain, 'AAAA', ipv6_list, default_ttl)
+                        print(f"  更新AAAA记录: {ipv6_list}")
+                        for extra in aaaa_records[1:]:
+                            delete_record_set(zone_id, extra['id'])
+                            print(f"  删除多余AAAA记录: {extra['id']}")
+                    else:
+                        create_record_set(zone_id, full_sub_domain, 'AAAA', ipv6_list, default_ttl)
+                        print(f"  创建AAAA记录: {ipv6_list}")
+                else:
+                    for rec in aaaa_records:
+                        delete_record_set(zone_id, rec['id'])
+                        print(f"  删除AAAA记录: {rec['id']}")
+
+                continue  # 跳过后续分组逻辑
+
+            # ---------- 正常分组模式（group_count > 0） ----------
+            # 确定IP池来源
             if sub_prefix == "def":
-                print(f"  特殊处理: 使用 Cloudflare DoH 解析得到的IP")
+                # def 特殊处理：使用 DoH 解析的 IP 池
                 ipv4_pool = [ip['ip'] for ip in CNAME_IPS['v4']]
                 ipv6_pool = [ip['ip'] for ip in CNAME_IPS['v6']]
+                print(f"  使用 DoH 解析得到的IP池 (IPv4: {len(ipv4_pool)}, IPv6: {len(ipv6_pool)})")
             else:
                 ipv4_pool = IPV4_POOL
                 ipv6_pool = IPV6_POOL
-            
-            # 获取当前所有记录集
+
+            print(f"需要 {group_count} 组记录 (每组: 2个IPv4 + 2个IPv6)")
+
+            # 获取当前记录集
             existing_records = get_record_sets(zone_id, full_sub_domain)
-            
-            # 分离A和AAAA记录 (只保留 default_view 线路)
             a_records = [r for r in existing_records if r['type'] == 'A' and r['line'] == 'default_view']
             aaaa_records = [r for r in existing_records if r['type'] == 'AAAA' and r['line'] == 'default_view']
-            
+
             print(f"当前A记录数: {len(a_records)}")
             print(f"当前AAAA记录数: {len(aaaa_records)}")
-            
-            target_a_count = group_count
-            target_aaaa_count = group_count
-            
+
+            target_count = group_count
+
             # 处理A记录
-            if target_a_count > 0:
-                if not ipv4_pool:
-                    print(f"  警告: IPv4池为空，跳过A记录")
-                else:
-                    all_ipv4 = get_random_ips_from_pool(ipv4_pool, target_a_count * 2)
-                    print(f"获取到 {len(all_ipv4)} 个IPv4地址")
-                    
-                    for i in range(target_a_count):
-                        start_idx = i * 2
-                        if start_idx + 1 >= len(all_ipv4):
-                            print(f"  警告: IPv4地址不足，跳过第 {i} 组")
-                            break
-                        
-                        ip_pair = all_ipv4[start_idx:start_idx + 2]
-                        
-                        if i < len(a_records):
-                            # 更新现有记录
-                            try:
-                                update_record_set(zone_id, a_records[i]['id'], full_sub_domain, 'A', ip_pair, default_ttl)
-                                print(f"  更新A记录[{i}]: {ip_pair}")
-                            except Exception as e:
-                                print(f"  更新A记录[{i}]失败: {str(e)}")
-                        else:
-                            # 创建新记录
-                            try:
-                                create_record_set(zone_id, full_sub_domain, 'A', ip_pair, default_ttl)
-                                print(f"  创建A记录[{i}]: {ip_pair}")
-                            except Exception as e:
-                                print(f"  创建A记录[{i}]失败: {str(e)}")
-                    
-                    # 删除多余的A记录
-                    if len(a_records) > target_a_count:
-                        for extra in a_records[target_a_count:]:
-                            try:
-                                delete_record_set(zone_id, extra['id'])
-                                print(f"  删除多余A记录: {extra['id']} - {extra['records']}")
-                            except Exception as e:
-                                print(f"  删除A记录失败: {str(e)}")
-            
+            if target_count > 0 and ipv4_pool:
+                all_ipv4 = get_random_ips_from_pool(ipv4_pool, target_count * 2)
+                print(f"获取到 {len(all_ipv4)} 个IPv4地址")
+                for i in range(target_count):
+                    start_idx = i * 2
+                    if start_idx + 1 >= len(all_ipv4):
+                        print(f"  警告: IPv4地址不足，跳过第 {i} 组")
+                        break
+                    ip_pair = all_ipv4[start_idx:start_idx + 2]
+                    if i < len(a_records):
+                        update_record_set(zone_id, a_records[i]['id'], full_sub_domain, 'A', ip_pair, default_ttl)
+                        print(f"  更新A记录[{i}]: {ip_pair}")
+                    else:
+                        create_record_set(zone_id, full_sub_domain, 'A', ip_pair, default_ttl)
+                        print(f"  创建A记录[{i}]: {ip_pair}")
+                # 删除多余记录
+                if len(a_records) > target_count:
+                    for extra in a_records[target_count:]:
+                        delete_record_set(zone_id, extra['id'])
+                        print(f"  删除多余A记录: {extra['id']} - {extra['records']}")
+            else:
+                # 如果目标为0或IP池为空，删除所有A记录
+                for rec in a_records:
+                    delete_record_set(zone_id, rec['id'])
+                    print(f"  删除A记录: {rec['id']} (目标数量0或IP池为空)")
+
             # 处理AAAA记录
-            if target_aaaa_count > 0:
-                if not ipv6_pool:
-                    print(f"  警告: IPv6池为空，跳过AAAA记录")
-                else:
-                    all_ipv6 = get_random_ips_from_pool(ipv6_pool, target_aaaa_count * 2)
-                    print(f"获取到 {len(all_ipv6)} 个IPv6地址")
-                    
-                    for i in range(target_aaaa_count):
-                        start_idx = i * 2
-                        if start_idx + 1 >= len(all_ipv6):
-                            print(f"  警告: IPv6地址不足，跳过第 {i} 组")
-                            break
-                        
-                        ip_pair = all_ipv6[start_idx:start_idx + 2]
-                        
-                        if i < len(aaaa_records):
-                            try:
-                                update_record_set(zone_id, aaaa_records[i]['id'], full_sub_domain, 'AAAA', ip_pair, default_ttl)
-                                print(f"  更新AAAA记录[{i}]: {ip_pair}")
-                            except Exception as e:
-                                print(f"  更新AAAA记录[{i}]失败: {str(e)}")
-                        else:
-                            try:
-                                create_record_set(zone_id, full_sub_domain, 'AAAA', ip_pair, default_ttl)
-                                print(f"  创建AAAA记录[{i}]: {ip_pair}")
-                            except Exception as e:
-                                print(f"  创建AAAA记录[{i}]失败: {str(e)}")
-                    
-                    if len(aaaa_records) > target_aaaa_count:
-                        for extra in aaaa_records[target_aaaa_count:]:
-                            try:
-                                delete_record_set(zone_id, extra['id'])
-                                print(f"  删除多余AAAA记录: {extra['id']} - {extra['records']}")
-                            except Exception as e:
-                                print(f"  删除AAAA记录失败: {str(e)}")
-            
+            if target_count > 0 and ipv6_pool:
+                all_ipv6 = get_random_ips_from_pool(ipv6_pool, target_count * 2)
+                print(f"获取到 {len(all_ipv6)} 个IPv6地址")
+                for i in range(target_count):
+                    start_idx = i * 2
+                    if start_idx + 1 >= len(all_ipv6):
+                        print(f"  警告: IPv6地址不足，跳过第 {i} 组")
+                        break
+                    ip_pair = all_ipv6[start_idx:start_idx + 2]
+                    if i < len(aaaa_records):
+                        update_record_set(zone_id, aaaa_records[i]['id'], full_sub_domain, 'AAAA', ip_pair, default_ttl)
+                        print(f"  更新AAAA记录[{i}]: {ip_pair}")
+                    else:
+                        create_record_set(zone_id, full_sub_domain, 'AAAA', ip_pair, default_ttl)
+                        print(f"  创建AAAA记录[{i}]: {ip_pair}")
+                if len(aaaa_records) > target_count:
+                    for extra in aaaa_records[target_count:]:
+                        delete_record_set(zone_id, extra['id'])
+                        print(f"  删除多余AAAA记录: {extra['id']} - {extra['records']}")
+            else:
+                for rec in aaaa_records:
+                    delete_record_set(zone_id, rec['id'])
+                    print(f"  删除AAAA记录: {rec['id']} (目标数量0或IP池为空)")
+
             print(f"完成 {display_name}")
-    
+
     print("\n所有操作完成")
